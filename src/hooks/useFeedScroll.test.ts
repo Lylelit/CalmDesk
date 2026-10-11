@@ -27,8 +27,12 @@ describe('findCurrentWeekId — ближайшая рабочая неделя',
     expect(formatDateKey(new Date(w42.days[4].date))).toBe('2026-10-16');
   });
 
-  it('в субботу относится к уходящей рабочей неделе', () => {
-    expect(findCurrentWeekId(feed, new Date(2026, 9, 10))).toBe('2026-W41');
+  it('в субботу 10.10.2026 возвращает W42 (ближайшая предстоящая рабочая неделя)', () => {
+    expect(findCurrentWeekId(feed, new Date(2026, 9, 10))).toBe('2026-W42');
+  });
+
+  it('в воскресенье 18.10.2026 возвращает W43 (пн 19–пт 23 октября)', () => {
+    expect(findCurrentWeekId(feed, new Date(2026, 9, 18))).toBe('2026-W43');
   });
 
   it('в будний день — неделя сегодняшнего дня', () => {

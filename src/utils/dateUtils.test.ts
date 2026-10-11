@@ -88,8 +88,8 @@ describe('findCurrentWeekId', () => {
     expect(findCurrentWeekId(feed, new Date(2026, 9, 11))).toBe('2026-W42'); // вс → W42 (пн 12.10)
   });
 
-  it('в субботу находит текущую рабочую неделю', () => {
-    expect(findCurrentWeekId(feed, new Date(2026, 9, 10))).toBe('2026-W41'); // сб → W41
+  it('в субботу находит ближайшую предстоящую рабочую неделю', () => {
+    expect(findCurrentWeekId(feed, new Date(2026, 9, 10))).toBe('2026-W42'); // сб 10.10 → W42 (пн 12.10)
   });
 
   it('возвращает null, если неделя вне ленты', () => {
