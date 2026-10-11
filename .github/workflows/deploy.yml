@@ -30,14 +30,15 @@ jobs:
         run: npm ci
 
       # Ключи Supabase берутся из настроек репозитория
-      # (Settings → Secrets and variables → Actions → Variables):
-      #   VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY.
-      # Без них публичная сборка упадёт на «Invalid supabaseUrl» (белый экран).
+      # (Settings → Secrets and variables → Actions). Поддерживаются оба набора имён —
+      # тот же самый, что читает приложение локально (NEXT_PUBLIC_*), и стандартный Vite (VITE_*).
+      # Если переменные не заданы вообще — сборка не упадёт, но сайт будет работать
+      # на localStorage (в консоли: «Supabase не настроен»).
       - name: Build
         run: npm run build
         env:
-          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || vars.NEXT_PUBLIC_SUPABASE_URL || secrets.VITE_SUPABASE_URL || secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || vars.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || secrets.VITE_SUPABASE_ANON_KEY || secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
 
       - name: Fix asset paths
         run: node fix-paths.js
