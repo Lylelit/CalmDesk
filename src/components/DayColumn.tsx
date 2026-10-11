@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Day, Task, TaskAssignment } from '../types';
 import { HOURS_PER_DAY, formatDate, getDayName } from '../utils/dateUtils';
 import { formatHours, parseTimeInput } from '../utils/timeFormat';
@@ -28,8 +29,36 @@ export default function DayColumn({ day, tasks, assignments, onDropTask, onRemov
   const [showSplitMenu, setShowSplitMenu] = useState(false);
   const [splittingAssignmentId, setSplittingAssignmentId] = useState<string | null>(null);
   const [showDayMenu, setShowDayMenu] = useState(false);
+  const dayMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const [dayMenuPos, setDayMenuPos] = useState<{ top: number; left: number; minWidth: number } | null>(null);
   const [showShortDayInput, setShowShortDayInput] = useState(false);
   const [shortDayHours, setShortDayHours] = useState('');
+
+  // Позиционируем выпадающее меню типа дня через portal (relative to viewport),
+  // чтобы оно не обрезалось overflow: hidden карточки дня.
+  useLayoutEffect(() => {
+    if (!showDayMenu) { setDayMenuPos(null); return; }
+    const update = () => {
+      const el = dayMenuButtonRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      setDayMenuPos({ top: rect.bottom + 4, left: rect.right, minWidth: Math.max(rect.width, 160) });
+    };
+    update();
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    return () => {
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+    };
+  }, [showDayMenu]);
+
+  useEffect(() => {
+    if (!showDayMenu) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setShowDayMenu(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [showDayMenu]);
 
   const cardBg = isActiveMonth ? (mode === 'dark' ? '#383838' : '#FFFFFF') : (mode === 'dark' ? '#303030' : '#EBF1F6');
 
@@ -102,23 +131,40 @@ export default function DayColumn({ day, tasks, assignments, onDropTask, onRemov
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
             {isActiveMonth && !isNonWorking && <div style={{ fontSize: 12, fontWeight: 600, padding: '2px 8px', borderRadius: 12, background: freeHoursBg, color: freeHoursColor }}>{formatHours(freeHours)}</div>}
-            <button onClick={() => setShowDayMenu(!showDayMenu)} style={{ padding: 4, borderRadius: 4, border: 'none', cursor: 'pointer', background: 'transparent', color: theme.textTertiary }} title="Отметить день">
+            <button ref={dayMenuButtonRef} onClick={() => setShowDayMenu(!showDayMenu)} style={{ padding: 4, borderRadius: 4, border: 'none', cursor: 'pointer', background: 'transparent', color: theme.textTertiary }} title="Отметить день">
               <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="5" r="1" fill="currentColor"/><circle cx="12" cy="19" r="1" fill="currentColor"/></svg>
             </button>
           </div>
         </div>
         {isActiveMonth && !isNonWorking && <div style={{ marginTop: 8, height: 4, background: theme.bgTertiary, borderRadius: 2, overflow: 'hidden' }}><div style={{ height: '100%', borderRadius: 2, transition: 'width 0.5s', width: `${Math.min(fillPercent, 100)}%`, background: fillPercent >= 100 ? theme.danger : fillPercent >= 75 ? theme.warning : theme.success }} /></div>}
+      </div>
 
-        {/* Day status menu */}
-        {showDayMenu && (
-          <div style={{ position: 'absolute', top: '100%', right: 0, zIndex: 1000, background: theme.bgCard, border: `1px solid ${theme.borderPrimary}`, borderRadius: 8, boxShadow: theme.shadowLg, padding: 4, minWidth: 160 }}>
+      {/* Day status menu — рендерится через portal в document.body, чтобы не обрезаться overflow: hidden карточки дня */}
+      {showDayMenu && dayMenuPos && createPortal(
+        <>
+          {/* Прозрачный оверлей: клик вне меню закрывает его */}
+          <div onClick={() => setShowDayMenu(false)} style={{ position: 'fixed', inset: 0, zIndex: 9999 }} />
+          <div style={{
+            position: 'fixed',
+            top: dayMenuPos.top,
+            left: dayMenuPos.left,
+            transform: 'translateX(-100%)',
+            zIndex: 10000,
+            background: theme.bgCard,
+            border: `1px solid ${theme.borderPrimary}`,
+            borderRadius: 8,
+            boxShadow: theme.shadowLg,
+            padding: 4,
+            minWidth: dayMenuPos.minWidth,
+          }}>
             <button onClick={() => { onSetDayStatus(day.id, 'working'); setShowDayMenu(false); }} disabled={!isNonWorking && !isShort} style={{ display: 'block', width: '100%', padding: '8px 12px', border: 'none', background: !isNonWorking && !isShort ? theme.bgSecondary : 'transparent', color: !isNonWorking && !isShort ? theme.textPrimary : theme.textTertiary, fontSize: 13, textAlign: 'left', cursor: !isNonWorking && !isShort ? 'default' : 'pointer', borderRadius: 4 }}>Рабочий день</button>
             <button onClick={() => { onSetDayStatus(day.id, 'vacation'); setShowDayMenu(false); }} disabled={isVacation} style={{ display: 'block', width: '100%', padding: '8px 12px', border: 'none', background: isVacation ? `${theme.warning}20` : 'transparent', color: isVacation ? theme.warning : theme.textPrimary, fontSize: 13, textAlign: 'left', cursor: isVacation ? 'default' : 'pointer', borderRadius: 4 }}>Отпуск</button>
             <button onClick={() => { onSetDayStatus(day.id, 'holiday'); setShowDayMenu(false); }} disabled={isHoliday} style={{ display: 'block', width: '100%', padding: '8px 12px', border: 'none', background: isHoliday ? `${theme.accent2}20` : 'transparent', color: isHoliday ? theme.accent2 : theme.textPrimary, fontSize: 13, textAlign: 'left', cursor: isHoliday ? 'default' : 'pointer', borderRadius: 4 }}>Выходной</button>
             <button onClick={() => { setShowDayMenu(false); setShowShortDayInput(true); setShortDayHours(day.shortHours?.toString() || '6'); }} disabled={isShort} style={{ display: 'block', width: '100%', padding: '8px 12px', border: 'none', background: isShort ? `${theme.accent1}20` : 'transparent', color: isShort ? theme.accent1 : theme.textPrimary, fontSize: 13, textAlign: 'left', cursor: isShort ? 'default' : 'pointer', borderRadius: 4 }}>Короткий день</button>
           </div>
-        )}
-      </div>
+        </>,
+        document.body
+      )}
 
       {/* Task blocks */}
       <div style={{ flex: 1, padding: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>

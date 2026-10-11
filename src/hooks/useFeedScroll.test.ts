@@ -77,12 +77,11 @@ describe('computeActiveWeekScrollTop — позиция активной нед�
     const scrollTop = 0;
     const weekTop = 1000; // верх W42 до скролла
     const newTop = computeActiveWeekScrollTop(contTop, scrollTop, weekTop);
-    // Старая формула: -90 (шапка) + CURRENT_WEEK_ROW_OFFSET (90+140+16),
-    // т.е. прокрутка была на один ряд карточек с отступом (156px) глубже:
-    // верх активной недели уходил ЗА верх контейнера и она сползала вниз
-    // за границу экрана.
+    // Старая формула: -90 (шапка) + CURRENT_WEEK_ROW_OFFSET (90+140+16 = 246px),
+    // т.е. прокрутка была на один ряд карточек с отступом глубже — верх активной
+    // недели уходил за нижнюю границу экрана.
     const oldTop = Math.max(0, scrollTop + (weekTop - contTop) - 90 + (90 + 140 + 16));
-    expect(oldTop - newTop).toBe(140 + 16);
+    expect(oldTop - newTop).toBe(246); // ровно CURRENT_WEEK_ROW_OFFSET
     expect(newTop).toBe(weekTop - 90);
   });
 });
