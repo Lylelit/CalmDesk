@@ -10,10 +10,10 @@ const cssFile = assets.find(f => f.endsWith('.css'));
 
 // Replace paths with GitHub Pages paths
 if (jsFile) {
-  content = content.replace(/src="\/assets\/[^"]+"/g, `src="/monthly-planner2/assets/${jsFile}"`);
+  content = content.replace(/src="\/assets\/[^"]+"/g, `src="/CalmDesk/assets/${jsFile}"`);
 }
 if (cssFile) {
-  content = content.replace(/href="\/assets\/[^"]+"/g, `href="/monthly-planner2/assets/${cssFile}"`);
+  content = content.replace(/href="\/assets\/[^"]+"/g, `href="/CalmDesk/assets/${cssFile}"`);
 }
 
 writeFileSync(indexPath, content);

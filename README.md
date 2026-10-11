@@ -76,7 +76,7 @@ npm run build
 
 В репозитории уже лежит workflow `.github/workflows/deploy.yml`: при каждом пуше
 в ветку `main` сайт собирается и публикуется на GitHub Pages по адресу
-`https://<ваш-логин>.github.io/<имя-репозитория>/monthly-planner2/...`
+`https://<ваш-логин>.github.io/<имя-репозитория>/...`
 (точный адрес публикуется в логе деплоя и в Settings → Pages).
 
 **Обязательно перед первым деплоем:** так как `.env.local` не попадает в git,

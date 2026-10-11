@@ -611,7 +611,7 @@ function App() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
             <span>Сделано с ❤️</span>
             <a
-              href="https://github.com/lylelit/monthly-planner2"
+              href="https://github.com/lylelit/CalmDesk"
               target="_blank"
               rel="noopener noreferrer"
               style={{ color: theme.textTertiary, textDecoration: 'none' }}
