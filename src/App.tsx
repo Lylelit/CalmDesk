@@ -102,7 +102,14 @@ function App() {
   const { scrollToMonth } = useFeedScroll(weeksContainerRef, weeks, currentWeekId, visibleMonth, setVisibleMonth);
 
   // ── Метрики и фильтрация ─────────────────────────────────────────────
-  const { totalWorkingHours, remainingWorkingHours } = useMonthStats(assignments, dayStatuses, currentYear, currentMonth);
+  // Метрики считаются для ВИДИМОГО месяца (шапка и счётчик должны
+  // переключаться вместе с лентой), а не для календарного месяца «сегодня».
+  const { totalWorkingHours, remainingWorkingHours } = useMonthStats(
+    assignments,
+    dayStatuses,
+    visibleMonth.year,
+    visibleMonth.month,
+  );
   const filteredTasks = useFilteredTasks(tasks, searchQuery, statusFilter);
 
   const newTasks = useMemo(() => filteredTasks.filter((t) => t.status !== 'completed'), [filteredTasks]);
