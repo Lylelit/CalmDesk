@@ -1,11 +1,18 @@
 import { useState } from 'react';
 import { useTheme } from '../ThemeContext';
+import { supabase, isSupabaseConfigured } from '../services/supabaseClient';
 
 export interface Profile {
   login: string;
   password: string;
   displayName: string;
   createdAt: string;
+  /** uuid пользователя в Supabase (заполняется при supabase-режиме) */
+  id?: string;
+  /** Роль в системе: руководитель или сотрудник. */
+  role?: 'manager' | 'employee';
+  /** Email используется как логин в supabase-режиме. */
+  email?: string;
 }
 
 interface AuthScreenProps {
@@ -27,13 +34,28 @@ function saveProfiles(profiles: Profile[]) {
   localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles));
 }
 
+/** Профиль из строки public.profiles (supabase-режим). */
+async function fetchMyProfile(userId: string, email: string): Promise<Profile> {
+  let displayName = email.split('@')[0];
+  let role: 'manager' | 'employee' = 'employee';
+  if (supabase) {
+    const { data } = await supabase.from('profiles').select('display_name, role').eq('id', userId).maybeSingle();
+    if (data) {
+      displayName = data.display_name || displayName;
+      role = data.role;
+    }
+  }
+  return { login: email, email, password: '', displayName, role, id: userId, createdAt: new Date().toISOString() };
+}
+
 export default function AuthScreen({ onLogin }: AuthScreenProps) {
   const { theme } = useTheme();
-  const [mode, setMode] = useState<'select' | 'login' | 'register'>('select');
+  const [mode, setMode] = useState<'select' | 'login' | 'register'>(isSupabaseConfigured ? 'login' : 'select');
   const [login, setLogin] = useState('');
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
   const [profiles] = useState<Profile[]>(getProfiles());
 
   const inputStyle = {
@@ -43,7 +65,46 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
     transition: 'border-color 0.2s', boxSizing: 'border-box' as const
   };
 
+  // ── Supabase-режим: регистрация через email+пароль (Auth) ────────────────
+  const handleSupabaseRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    if (!supabase) return;
+    if (!login.trim() || !password.trim() || !displayName.trim()) { setError('Заполните все поля'); return; }
+    setBusy(true);
+    const { data, error: err } = await supabase.auth.signUp({
+      email: login.trim(),
+      password,
+      options: { data: { display_name: displayName.trim() } },
+    });
+    setBusy(false);
+    if (err) { setError(err.message); return; }
+    if (data.user) {
+      onLogin(await fetchMyProfile(data.user.id, data.user.email ?? login.trim()));
+    } else {
+      setError('Аккаунт создан. Подтвердите email и войдите.');
+      setMode('login');
+    }
+  };
+
+  // ── Supabase-режим: вход по email+пароль ─────────────────────────────────
+  const handleSupabaseLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    if (!supabase) return;
+    if (!login.trim() || !password.trim()) { setError('Введите email и пароль'); return; }
+    setBusy(true);
+    const { data, error: err } = await supabase.auth.signInWithPassword({
+      email: login.trim(),
+      password,
+    });
+    setBusy(false);
+    if (err) { setError('Неверный email или пароль'); return; }
+    if (data.user) onLogin(await fetchMyProfile(data.user.id, data.user.email ?? login.trim()));
+  };
+
   const handleRegister = (e: React.FormEvent) => {
+    if (isSupabaseConfigured) return handleSupabaseRegister(e);
     e.preventDefault();
     setError('');
     if (!login.trim() || !password.trim() || !displayName.trim()) { setError('Заполните все поля'); return; }
@@ -56,6 +117,7 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
   };
 
   const handleLogin = (e: React.FormEvent) => {
+    if (isSupabaseConfigured) return handleSupabaseLogin(e);
     e.preventDefault();
     setError('');
     if (!login.trim() || !password.trim()) { setError('Введите логин и пароль'); return; }
@@ -76,13 +138,13 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
           </div>
           <h1 style={{ fontSize: '24px', fontWeight: 700, color: theme.textPrimary, margin: '0 0 8px' }}>CalmDesk</h1>
           <p style={{ fontSize: '14px', color: theme.textSecondary, margin: 0 }}>
-            {mode === 'select' && profiles.length > 0 ? 'Выберите профиль' : mode === 'login' ? 'Вход в систему' : 'Создание профиля'}
+            {isSupabaseConfigured ? (mode === 'login' ? 'Вход по email' : 'Регистрация') : mode === 'select' && profiles.length > 0 ? 'Выберите профиль' : mode === 'login' ? 'Вход в систему' : 'Создание профиля'}
           </p>
         </div>
 
         {mode === 'select' && (
           <>
-            {profiles.length > 0 && (
+            {!isSupabaseConfigured && profiles.length > 0 && (
               <div style={{ marginBottom: '24px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 {profiles.map(profile => (
                   <button key={profile.login} onClick={() => onLogin(profile)} style={{
@@ -102,8 +164,8 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
               </div>
             )}
             <div style={{ display: 'flex', gap: '8px' }}>
-              <button onClick={() => setMode('login')} style={{ flex: 1, padding: '12px', background: theme.bgSecondary, color: theme.textPrimary, border: `1px solid ${theme.borderPrimary}`, borderRadius: '8px', fontSize: '14px', fontWeight: 500, cursor: 'pointer' }}>Войти</button>
-              <button onClick={() => setMode('register')} style={{ flex: 1, padding: '12px', background: theme.accent1, color: 'white', border: 'none', borderRadius: '8px', fontSize: '14px', fontWeight: 500, cursor: 'pointer' }}>Новый профиль</button>
+              <button onClick={() => setMode('login')} style={{ flex: 1, padding: '12px', background: theme.bgSecondary, color: theme.textPrimary, border: `1px solid ${theme.borderPrimary}`, borderRadius: '8px', fontSize: '14px', fontWeight: 500, cursor: 'pointer' }}>{busy ? 'Подождите...' : 'Войти'}</button>
+              <button onClick={() => setMode('register')} style={{ flex: 1, padding: '12px', background: theme.accent1, color: 'white', border: 'none', borderRadius: '8px', fontSize: '14px', fontWeight: 500, cursor: 'pointer' }}>{isSupabaseConfigured ? 'Регистрация' : 'Новый профиль'}</button>
             </div>
           </>
         )}
@@ -111,15 +173,15 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
         {mode === 'login' && (
           <form onSubmit={handleLogin}>
             <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', fontSize: '14px', fontWeight: 500, color: theme.textSecondary, marginBottom: '8px' }}>Логин</label>
-              <input type="text" value={login} onChange={(e) => setLogin(e.target.value)} style={inputStyle} autoFocus />
+              <label style={{ display: 'block', fontSize: '14px', fontWeight: 500, color: theme.textSecondary, marginBottom: '8px' }}>{isSupabaseConfigured ? 'Email' : 'Логин'}</label>
+              <input type={isSupabaseConfigured ? 'email' : 'text'} value={login} onChange={(e) => setLogin(e.target.value)} style={inputStyle} autoFocus />
             </div>
             <div style={{ marginBottom: '24px' }}>
               <label style={{ display: 'block', fontSize: '14px', fontWeight: 500, color: theme.textSecondary, marginBottom: '8px' }}>Пароль</label>
               <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={inputStyle} />
             </div>
             {error && <div style={{ padding: '12px', background: `${theme.danger}15`, border: `1px solid ${theme.danger}30`, borderRadius: '8px', color: theme.danger, fontSize: '14px', marginBottom: '16px' }}>{error}</div>}
-            <button type="submit" style={{ width: '100%', padding: '12px', background: theme.accent1, color: 'white', border: 'none', borderRadius: '8px', fontSize: '14px', fontWeight: 600, cursor: 'pointer' }}>Войти</button>
+            <button type="submit" style={{ width: '100%', padding: '12px', background: theme.accent1, color: 'white', border: 'none', borderRadius: '8px', fontSize: '14px', fontWeight: 600, cursor: 'pointer' }}>{busy ? 'Подождите...' : 'Войти'}</button>
             <button type="button" onClick={() => { setMode('select'); setError(''); setLogin(''); setPassword(''); }} style={{ width: '100%', marginTop: '12px', padding: '12px', background: 'transparent', color: theme.textSecondary, border: 'none', fontSize: '14px', cursor: 'pointer' }}>← Назад</button>
           </form>
         )}
@@ -131,15 +193,15 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
               <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Например: Иван" style={inputStyle} autoFocus />
             </div>
             <div style={{ marginBottom: '16px' }}>
-              <label style={{ display: 'block', fontSize: '14px', fontWeight: 500, color: theme.textSecondary, marginBottom: '8px' }}>Логин</label>
-              <input type="text" value={login} onChange={(e) => setLogin(e.target.value)} placeholder="Латинские буквы и цифры" style={inputStyle} />
+              <label style={{ display: 'block', fontSize: '14px', fontWeight: 500, color: theme.textSecondary, marginBottom: '8px' }}>{isSupabaseConfigured ? 'Email' : 'Логин'}</label>
+              <input type={isSupabaseConfigured ? 'email' : 'text'} value={login} onChange={(e) => setLogin(e.target.value)} placeholder={isSupabaseConfigured ? 'you@company.com' : 'Латинские буквы и цифры'} style={inputStyle} />
             </div>
             <div style={{ marginBottom: '24px' }}>
               <label style={{ display: 'block', fontSize: '14px', fontWeight: 500, color: theme.textSecondary, marginBottom: '8px' }}>Пароль</label>
               <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Минимум 3 символа" style={inputStyle} />
             </div>
             {error && <div style={{ padding: '12px', background: `${theme.danger}15`, border: `1px solid ${theme.danger}30`, borderRadius: '8px', color: theme.danger, fontSize: '14px', marginBottom: '16px' }}>{error}</div>}
-            <button type="submit" style={{ width: '100%', padding: '12px', background: theme.accent1, color: 'white', border: 'none', borderRadius: '8px', fontSize: '14px', fontWeight: 600, cursor: 'pointer' }}>Создать профиль</button>
+            <button type="submit" style={{ width: '100%', padding: '12px', background: theme.accent1, color: 'white', border: 'none', borderRadius: '8px', fontSize: '14px', fontWeight: 600, cursor: 'pointer' }}>{busy ? 'Подождите...' : 'Создать профиль'}</button>
             <button type="button" onClick={() => { setMode('select'); setError(''); setLogin(''); setPassword(''); setDisplayName(''); }} style={{ width: '100%', marginTop: '12px', padding: '12px', background: 'transparent', color: theme.textSecondary, border: 'none', fontSize: '14px', cursor: 'pointer' }}>← Назад</button>
           </form>
         )}

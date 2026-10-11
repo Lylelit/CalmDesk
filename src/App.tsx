@@ -8,6 +8,7 @@ import EditTaskModal from './components/EditTaskModal';
 import SearchFilter from './components/SearchFilter';
 import ExportModal from './components/ExportModal';
 import AuthScreen, { Profile } from './components/AuthScreen';
+import TeamPanel from './components/TeamPanel';
 import Header from './components/Header';
 import WeekRow from './components/WeekRow';
 import SidebarCollapsed, { HintBanner } from './components/Sidebar';
@@ -16,7 +17,8 @@ import { Spinner } from './components/ui';
 // import RedmineSettingsModal from './components/RedmineSettingsModal';
 // import RedmineImportModal from './components/RedmineImportModal';
 import { exportToExcel } from './utils/excelExport';
-import { loadTasks, loadAssignments, saveTasks, saveAssignments, setCurrentProfile } from './services/storageService';
+import { loadTasks, loadAssignments, saveTasks, saveAssignments, setCurrentProfile, setSupabaseUserId, getStorageMode, migrateLocalToSupabase } from './services/storageService';
+import { isTeamFeatureEnabled } from './services/teamService';
 // import { getRedmineSettings, RedmineSettings } from './services/redmineService';
 import { useTheme } from './ThemeContext';
 import { useTaskBoard, DayStatusEntry } from './hooks/useTaskBoard';
@@ -38,6 +40,8 @@ function App() {
   // ── Авторизация и профиль ────────────────────────────────────────────
   const [currentUser, setCurrentUser] = useState<Profile | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  // Режим руководителя: чью доску смотрим. null — свою, иначе uuid сотрудника.
+  const [viewingEmployeeId, setViewingEmployeeId] = useState<string | null>(null);
 
   // ── Календарная навигация ────────────────────────────────────────────
   const now = new Date();
@@ -119,20 +123,50 @@ function App() {
 
   // ── Эффекты: восстановление сессии, данные профиля, сохранение ──────
   useEffect(() => {
-    const savedLogin = localStorage.getItem('planner-current-user');
-    if (savedLogin) {
-      try {
-        const profiles = JSON.parse(localStorage.getItem('planner-profiles') || '[]');
-        const profile = profiles.find((p: Profile) => p.login === savedLogin);
-        if (profile) {
-          setCurrentUser(profile);
+    async function restoreSession() {
+      if (getStorageMode() === 'supabase') {
+        // Supabase сам хранит сессию (persistSession) — просто спрашиваем её.
+        const { supabase } = await import('./services/supabaseClient');
+        const { data } = await supabase!.auth.getSession();
+        const user = data.session?.user;
+        if (user) {
+          const { data: prof } = await supabase!
+            .from('profiles')
+            .select('display_name, role')
+            .eq('id', user.id)
+            .maybeSingle();
+          const profile: Profile = {
+            login: user.email ?? '',
+            email: user.email ?? undefined,
+            password: '',
+            displayName: prof?.display_name ?? (user.email ?? '').split('@')[0],
+            role: prof?.role ?? 'employee',
+            id: user.id,
+            createdAt: user.created_at,
+          };
+          setSupabaseUserId(user.id);
           setCurrentProfile(profile);
+          setCurrentUser(profile);
         }
-      } catch (e) {
-        console.error('Error loading profile:', e);
+        setAuthChecked(true);
+        return;
       }
+      const savedLogin = localStorage.getItem('planner-current-user');
+      if (savedLogin) {
+        try {
+          const profiles = JSON.parse(localStorage.getItem('planner-profiles') || '[]');
+          const profile = profiles.find((p: Profile) => p.login === savedLogin);
+          if (profile) {
+            setCurrentUser(profile);
+            setCurrentProfile(profile);
+          }
+        } catch (e) {
+          console.error('Error loading profile:', e);
+        }
+      }
+      setAuthChecked(true);
     }
-    setAuthChecked(true);
+    restoreSession();
 
     // Загрузка настроек Redmine
     // const settings = getRedmineSettings();
@@ -152,11 +186,20 @@ function App() {
         return;
       }
       try {
-        const [savedTasks, savedAssignments] = await Promise.all([loadTasks(), loadAssignments()]);
-        if (savedTasks.length > 0) board.setTasks(savedTasks);
-        if (savedAssignments.length > 0) board.setAssignments(savedAssignments);
-        const savedDayStatuses = localStorage.getItem(`planner-day-statuses-${currentUser.login}`);
+        if (getStorageMode() === 'supabase' && currentUser.id && !viewingEmployeeId) {
+          // При первом входе переносим старые локальные данные пользователя в облако.
+          await migrateLocalToSupabase(currentUser.id);
+        }
+        const viewer = viewingEmployeeId ? { userId: viewingEmployeeId } : undefined;
+        const [savedTasks, savedAssignments] = await Promise.all([loadTasks(viewer), loadAssignments(viewer)]);
+        board.setTasks(savedTasks);
+        board.setAssignments(savedAssignments);
+        const dayStatusesKey = viewingEmployeeId
+          ? `planner-day-statuses-${viewingEmployeeId}`
+          : `planner-day-statuses-${currentUser.login}`;
+        const savedDayStatuses = localStorage.getItem(dayStatusesKey);
         if (savedDayStatuses) setDayStatuses(JSON.parse(savedDayStatuses));
+        else setDayStatuses({});
       } catch (error) {
         console.error('Error loading ', error);
       } finally {
@@ -165,14 +208,16 @@ function App() {
     }
     if (authChecked) loadData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUser, authChecked]);
+  }, [currentUser, authChecked, viewingEmployeeId]);
 
   useEffect(() => {
-    if (!isLoading && currentUser) saveTasks(tasks);
-  }, [tasks, isLoading, currentUser]);
+    // При просмотре доски сотрудника сохранение отключено: руководитель
+    // добавляет задачи сотруднику через TeamPanel/API с явным owner_id.
+    if (!isLoading && currentUser && !viewingEmployeeId) saveTasks(tasks);
+  }, [tasks, isLoading, currentUser, viewingEmployeeId]);
   useEffect(() => {
-    if (!isLoading && currentUser) saveAssignments(assignments);
-  }, [assignments, isLoading, currentUser]);
+    if (!isLoading && currentUser && !viewingEmployeeId) saveAssignments(assignments);
+  }, [assignments, isLoading, currentUser, viewingEmployeeId]);
 
   // ── Обработчики ──────────────────────────────────────────────────────
   const toggleHint = () => {
@@ -217,15 +262,28 @@ function App() {
   const handleLogin = (profile: Profile) => {
     setCurrentUser(profile);
     setCurrentProfile(profile);
+    setSupabaseUserId(profile.id ?? null);
+    setViewingEmployeeId(null);
     localStorage.setItem('planner-current-user', profile.login);
     setIsLoading(true);
   };
 
   const handleSignOut = () => {
+    if (getStorageMode() === 'supabase') {
+      void import('./services/supabaseClient').then(({ supabase }) => supabase?.auth.signOut());
+    }
     setCurrentUser(null);
     setCurrentProfile(null);
+    setSupabaseUserId(null);
+    setViewingEmployeeId(null);
     localStorage.removeItem('planner-current-user');
     board.resetBoard();
+  };
+
+  // Руководитель переключает доску: своя (null) или сотрудника.
+  const handleSwitchBoard = (employeeId: string | null) => {
+    setViewingEmployeeId(employeeId);
+    setIsLoading(true);
   };
 
   // ── Экраны загрузки / авторизации ────────────────────────────────────
@@ -383,6 +441,37 @@ function App() {
                 </div>
                 <TaskForm onAddTask={board.addTask} />
               </div>
+
+              {/* Панель руководителя: команда, просмотр досок сотрудников, назначение задач */}
+              {currentUser.role === 'manager' && (
+                <TeamPanel viewingEmployeeId={viewingEmployeeId} onSwitchBoard={handleSwitchBoard} />
+              )}
+
+              {/* Индикатор режима просмотра чужой доски */}
+              {viewingEmployeeId && (
+                <div
+                  style={{
+                    background: `${theme.accent1}20`,
+                    border: `1px solid ${theme.accent1}`,
+                    borderRadius: 12,
+                    padding: '10px 14px',
+                    fontSize: 13,
+                    color: theme.textPrimary,
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    gap: 8,
+                  }}
+                >
+                  <span>👁 Вы смотрите доску сотрудника</span>
+                  <button
+                    onClick={() => handleSwitchBoard(null)}
+                    style={{ padding: '6px 10px', borderRadius: 8, border: 'none', background: theme.accent1, color: '#fff', fontSize: 12, cursor: 'pointer' }}
+                  >
+                    К своей доске
+                  </button>
+                </div>
+              )}
 
               {/* Redmine интеграция - временно скрыта из-за проблем с CORS */}
 

@@ -1,42 +1,212 @@
 import { Task, TaskAssignment } from '../types';
 import { Profile } from '../components/AuthScreen';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
+
+/**
+ * Слой хранилища с двумя режимами:
+ *   - 'supabase' — данные в облаке (если заданы VITE_SUPABASE_URL/ANON_KEY);
+ *   - 'local'    — localStorage (прежнее поведение, работает без настройки).
+ *
+ * Все функции асинхронные и одинаково работают в обоих режимах, поэтому
+ * «переезд» на Supabase не требует правок UI: достаточно применить
+ * `supabase/schema.sql` и создать `.env.local` с ключами проекта.
+ */
 
 let currentProfile: Profile | null = null;
+// uuid пользователя Supabase (auth.uid()) — заполняется AuthContext'ом после входа.
+// Нужен как owner_id для облачных таблиц; в локальном режиме не используется.
+let currentUserId: string | null = null;
 
 export function setCurrentProfile(profile: Profile | null) {
   currentProfile = profile;
+  if (!profile) currentUserId = null;
+}
+
+export function setSupabaseUserId(userId: string | null) {
+  currentUserId = userId;
+}
+
+export function getSupabaseUserId(): string | null {
+  return currentUserId;
 }
 
 export function getCurrentProfile(): Profile | null {
   return currentProfile;
 }
 
-export function getStorageMode(): 'local' {
-  return 'local';
+export function getStorageMode(): 'supabase' | 'local' {
+  return isSupabaseConfigured && supabase ? 'supabase' : 'local';
 }
 
-export async function loadTasks(): Promise<Task[]> {
+// ── Конвертеры форм: БД-строка ↔ тип приложения ─────────────────────────────
+interface TaskRow {
+  id: string; title: string; total_hours: number; color: string;
+  description: string | null; link: string | null;
+  status: 'new' | 'completed' | null; created_at: string | null; completed_at: string | null;
+}
+interface AssignmentRow {
+  id: string; task_id: string; day_id: string; hours: number; order: number;
+}
+
+const toTask = (r: TaskRow): Task => ({
+  id: r.id,
+  title: r.title,
+  totalHours: Number(r.total_hours),
+  color: r.color,
+  description: r.description ?? undefined,
+  link: r.link ?? undefined,
+  status: r.status ?? 'new',
+  createdAt: r.created_at ?? undefined,
+  completedAt: r.completed_at ?? undefined,
+});
+
+const toAssignment = (r: AssignmentRow): TaskAssignment => ({
+  id: r.id,
+  taskId: r.task_id,
+  dayId: r.day_id,
+  hours: Number(r.hours),
+  order: r.order,
+});
+
+// ── Публичный API ────────────────────────────────────────────────────────────
+export async function loadTasks(viewer?: { userId?: string }): Promise<Task[]> {
+  if (getStorageMode() === 'supabase') {
+    // viewer.userId — режим руководителя: смотрим доску сотрудника.
+    // Без него RLS и так вернёт только строки владельца (owner_id = auth.uid()).
+    let query = supabase!.from('tasks').select('*');
+    if (viewer?.userId) query = query.eq('owner_id', viewer.userId);
+    const { data, error } = await query;
+    if (error) throw error;
+    return (data as TaskRow[]).map(toTask);
+  }
   if (!currentProfile) return [];
   const data = getProfileData(currentProfile.login);
   return data.tasks || [];
 }
 
-export async function loadAssignments(): Promise<TaskAssignment[]> {
+export async function loadAssignments(viewer?: { userId?: string }): Promise<TaskAssignment[]> {
+  if (getStorageMode() === 'supabase') {
+    let query = supabase!.from('assignments').select('*');
+    if (viewer?.userId) query = query.eq('owner_id', viewer.userId);
+    const { data, error } = await query;
+    if (error) throw error;
+    return (data as AssignmentRow[]).map(toAssignment);
+  }
   if (!currentProfile) return [];
   const data = getProfileData(currentProfile.login);
   return data.assignments || [];
 }
 
-export async function saveTasks(tasks: Task[]): Promise<void> {
-  if (!currentProfile) return;
-  const data = getProfileData(currentProfile.login);
-  saveProfileData(currentProfile.login, { ...data, tasks });
+/**
+ * Полная синхронизация списка задач (diff-based upsert).
+ * В supabase-режиме localStorage тоже обновляется зеркально — это наш
+ * «страховочный копия» и источник для миграции старых данных.
+ */
+export async function saveTasks(tasks: Task[], ownerId?: string): Promise<void> {
+  if (currentProfile) {
+    const data = getProfileData(currentProfile.login);
+    saveProfileData(currentProfile.login, { ...data, tasks });
+  }
+  if (getStorageMode() !== 'supabase' || !supabase) return;
+  const owner = ownerId ?? currentUserId ?? currentProfile?.id;
+  if (!owner) return;
+
+  const { data: existing, error } = await supabase
+    .from('tasks')
+    .select('id')
+    .eq('owner_id', owner);
+  if (error) throw error;
+
+  const incomingIds = new Set(tasks.map((t) => t.id));
+  const toDelete = (existing as { id: string }[]).map((e) => e.id).filter((id) => !incomingIds.has(id));
+  if (toDelete.length > 0) {
+    const { error: delErr } = await supabase.from('tasks').delete().in('id', toDelete).eq('owner_id', owner);
+    if (delErr) throw delErr;
+  }
+
+  if (tasks.length > 0) {
+    const rows = tasks.map((t) => ({
+      id: t.id,
+      owner_id: owner,
+      title: t.title,
+      total_hours: t.totalHours,
+      color: t.color,
+      description: t.description ?? null,
+      link: t.link ?? null,
+      status: t.status ?? 'new',
+      created_at: t.createdAt ?? null,
+      completed_at: t.completedAt ?? null,
+    }));
+    const { error: upErr } = await supabase.from('tasks').upsert(rows, { onConflict: 'id' });
+    if (upErr) throw upErr;
+  }
 }
 
-export async function saveAssignments(assignments: TaskAssignment[]): Promise<void> {
-  if (!currentProfile) return;
-  const data = getProfileData(currentProfile.login);
-  saveProfileData(currentProfile.login, { ...data, assignments });
+export async function saveAssignments(assignments: TaskAssignment[], ownerId?: string): Promise<void> {
+  if (currentProfile) {
+    const data = getProfileData(currentProfile.login);
+    saveProfileData(currentProfile.login, { ...data, assignments });
+  }
+  if (getStorageMode() !== 'supabase' || !supabase) return;
+  const owner = ownerId ?? currentUserId ?? currentProfile?.id;
+  if (!owner) return;
+
+  const { data: existing, error } = await supabase
+    .from('assignments')
+    .select('id')
+    .eq('owner_id', owner);
+  if (error) throw error;
+
+  const incomingIds = new Set(assignments.map((a) => a.id));
+  const toDelete = (existing as { id: string }[]).map((e) => e.id).filter((id) => !incomingIds.has(id));
+  if (toDelete.length > 0) {
+    const { error: delErr } = await supabase.from('assignments').delete().in('id', toDelete).eq('owner_id', owner);
+    if (delErr) throw delErr;
+  }
+
+  if (assignments.length > 0) {
+    const rows = assignments.map((a) => ({
+      id: a.id,
+      owner_id: owner,
+      task_id: a.taskId,
+      day_id: a.dayId,
+      hours: a.hours,
+      order: a.order,
+    }));
+    const { error: upErr } = await supabase.from('assignments').upsert(rows, { onConflict: 'id' });
+    if (upErr) throw upErr;
+  }
+}
+
+/**
+ * Однократный перенос локальных данных пользователя в Supabase.
+ * Вызывается при первом входе после настройки облачного режима.
+ */
+export async function migrateLocalToSupabase(userId: string): Promise<{ migrated: boolean; tasks: number; assignments: number }> {
+  if (getStorageMode() !== 'supabase' || !currentProfile || !supabase) return { migrated: false, tasks: 0, assignments: 0 };
+  const sb = supabase;
+
+  const local = getProfileData(currentProfile.login);
+  // Если в облаке уже есть данные пользователя — не трогаем (защита от двойной миграции).
+  const { count } = await sb
+    .from('tasks')
+    .select('id', { count: 'exact', head: true })
+    .eq('owner_id', userId);
+  if ((count ?? 0) > 0) return { migrated: false, tasks: 0, assignments: 0 };
+
+  if (local.tasks.length > 0) {
+    await sb.from('tasks').insert(local.tasks.map((t) => ({
+      id: t.id, owner_id: userId, title: t.title, total_hours: t.totalHours, color: t.color,
+      description: t.description ?? null, link: t.link ?? null, status: t.status ?? 'new',
+      created_at: t.createdAt ?? null, completed_at: t.completedAt ?? null,
+    })));
+  }
+  if (local.assignments.length > 0) {
+    await sb.from('assignments').insert(local.assignments.map((a) => ({
+      id: a.id, owner_id: userId, task_id: a.taskId, day_id: a.dayId, hours: a.hours, order: a.order,
+    })));
+  }
+  return { migrated: true, tasks: local.tasks.length, assignments: local.assignments.length };
 }
 
 interface ProfileData {
