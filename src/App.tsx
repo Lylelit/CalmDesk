@@ -1,49 +1,154 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { Task, TaskAssignment, Week } from './types';
-import { getMonthWeeks, getMonthName, generateId, HOURS_PER_DAY, formatDateKey } from './utils/dateUtils';
-import { formatHours } from './utils/timeFormat';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Task } from './types';
+import { formatDateKey, getMonthName } from './utils/dateUtils';
 import TaskForm from './components/TaskForm';
 import TaskCard from './components/TaskCard';
-import DayColumn from './components/DayColumn';
 import CompletedTasksList from './components/CompletedTasksList';
 import EditTaskModal from './components/EditTaskModal';
 import SearchFilter from './components/SearchFilter';
 import ExportModal from './components/ExportModal';
 import AuthScreen, { Profile } from './components/AuthScreen';
+import Header from './components/Header';
+import WeekRow from './components/WeekRow';
+import SidebarCollapsed, { HintBanner } from './components/Sidebar';
+import { Spinner } from './components/ui';
+// Redmine интеграция - временно скрыта из-за проблем с CORS
 // import RedmineSettingsModal from './components/RedmineSettingsModal';
 // import RedmineImportModal from './components/RedmineImportModal';
 import { exportToExcel } from './utils/excelExport';
 import { loadTasks, loadAssignments, saveTasks, saveAssignments, setCurrentProfile } from './services/storageService';
 // import { getRedmineSettings, RedmineSettings } from './services/redmineService';
 import { useTheme } from './ThemeContext';
+import { useTaskBoard, DayStatusEntry } from './hooks/useTaskBoard';
+import { useFeedScroll, useWeeksFeed } from './hooks/useFeedScroll';
+import { useFilteredTasks, useMonthStats } from './hooks/useMonthStats';
 
+const MOBILE_BREAKPOINT = 768;
+
+/**
+ * Корневой компонент планировщика.
+ * Состоит из оркестрируемых хуков:
+ * - useTaskBoard — задачи и назначения (вся доменная логика доски);
+ * - useWeeksFeed + useFeedScroll — лента недель и её прокрутка;
+ * - useMonthStats / useFilteredTasks — метрики месяца и фильтрация списка.
+ */
 function App() {
   const { theme, mode, toggleTheme } = useTheme();
+
+  // ── Авторизация и профиль ────────────────────────────────────────────
   const [currentUser, setCurrentUser] = useState<Profile | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+
+  // ── Календарная навигация ────────────────────────────────────────────
   const now = new Date();
-  const [currentYear, setCurrentYear] = useState(now.getFullYear());
-  const [currentMonth, setCurrentMonth] = useState(now.getMonth());
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [assignments, setAssignments] = useState<TaskAssignment[]>([]);
-  const [dayStatuses, setDayStatuses] = useState<Record<string, { status: 'vacation' | 'holiday' | 'short'; hours?: number }>>({});
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth();
+  const [visibleMonth, setVisibleMonth] = useState({ month: currentMonth, year: currentYear });
+
+  // ── Доска задач ──────────────────────────────────────────────────────
+  const board = useTaskBoard();
+  const { tasks, assignments } = board;
+
+  // ── Статусы дней (отпуск / выходной / короткий день) ─────────────────
+  const [dayStatuses, setDayStatuses] = useState<Record<string, DayStatusEntry>>({});
+
+  // ── UI-состояние ─────────────────────────────────────────────────────
   const [, setDraggedTaskId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [showHint, setShowHint] = useState(() => !localStorage.getItem('planner-hint-dismissed'));
   const [editingTask, setEditingTask] = useState<Task | null>(null);
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  const [isMobile, setIsMobile] = useState(window.innerWidth < MOBILE_BREAKPOINT);
   const [showSidebar, setShowSidebar] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'new' | 'completed'>('all');
   const [showExportModal, setShowExportModal] = useState(false);
-  const [visibleMonth, setVisibleMonth] = useState({ month: now.getMonth(), year: now.getFullYear() });
-  const [shouldScrollToCurrentWeek, setShouldScrollToCurrentWeek] = useState(true);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  // Счётчики кликов по иконкам свёрнутого сайдбара — при изменении раскрывают нужную секцию в полной панели
   // const [redmineSettings, setRedmineSettings] = useState<RedmineSettings | null>(null);
   // const [showRedmineSettings, setShowRedmineSettings] = useState(false);
   // const [showRedmineImport, setShowRedmineImport] = useState(false);
 
+  const weeksContainerRef = useRef<HTMLDivElement>(null);
+
+  // ── Лента недель и прокрутка ─────────────────────────────────────────
+  const weeks = useWeeksFeed(currentYear);
+
+  const currentWeekId = useMemo(() => {
+    // Сравниваем по календарной дате (год/месяц/число), а не через toDateString,
+    // чтобы поиск текущей недели не зависел от времени суток и таймзоны.
+    const todayKey = formatDateKey(new Date());
+    const week = weeks.find((w) => w.days.some((day) => formatDateKey(new Date(day.date)) === todayKey));
+    return week?.id || null;
+  }, [weeks]);
+
+  const { scrollToMonth } = useFeedScroll(weeksContainerRef, weeks, currentWeekId, visibleMonth, setVisibleMonth);
+
+  // ── Метрики и фильтрация ─────────────────────────────────────────────
+  const { totalWorkingHours, remainingWorkingHours } = useMonthStats(assignments, dayStatuses, currentYear, currentMonth);
+  const filteredTasks = useFilteredTasks(tasks, searchQuery, statusFilter);
+
+  const newTasks = useMemo(() => filteredTasks.filter((t) => t.status !== 'completed'), [filteredTasks]);
+  const completedCount = useMemo(() => tasks.filter((t) => t.status === 'completed').length, [tasks]);
+  const activeTasks = useMemo(() => tasks.filter((t) => t.status !== 'completed'), [tasks]);
+  const newTasksTotalHours = useMemo(() => activeTasks.reduce((sum, t) => sum + t.totalHours, 0), [activeTasks]);
+
+  // ── Эффекты: восстановление сессии, данные профиля, сохранение ──────
+  useEffect(() => {
+    const savedLogin = localStorage.getItem('planner-current-user');
+    if (savedLogin) {
+      try {
+        const profiles = JSON.parse(localStorage.getItem('planner-profiles') || '[]');
+        const profile = profiles.find((p: Profile) => p.login === savedLogin);
+        if (profile) {
+          setCurrentUser(profile);
+          setCurrentProfile(profile);
+        }
+      } catch (e) {
+        console.error('Error loading profile:', e);
+      }
+    }
+    setAuthChecked(true);
+
+    // Загрузка настроек Redmine
+    // const settings = getRedmineSettings();
+    // if (settings) setRedmineSettings(settings);
+  }, []);
+
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  useEffect(() => {
+    async function loadData() {
+      if (!currentUser) {
+        setIsLoading(false);
+        return;
+      }
+      try {
+        const [savedTasks, savedAssignments] = await Promise.all([loadTasks(), loadAssignments()]);
+        if (savedTasks.length > 0) board.setTasks(savedTasks);
+        if (savedAssignments.length > 0) board.setAssignments(savedAssignments);
+        const savedDayStatuses = localStorage.getItem(`planner-day-statuses-${currentUser.login}`);
+        if (savedDayStatuses) setDayStatuses(JSON.parse(savedDayStatuses));
+      } catch (error) {
+        console.error('Error loading ', error);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+    if (authChecked) loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser, authChecked]);
+
+  useEffect(() => {
+    if (!isLoading && currentUser) saveTasks(tasks);
+  }, [tasks, isLoading, currentUser]);
+  useEffect(() => {
+    if (!isLoading && currentUser) saveAssignments(assignments);
+  }, [assignments, isLoading, currentUser]);
+
+  // ── Обработчики ──────────────────────────────────────────────────────
   const toggleHint = () => {
     const newState = !showHint;
     setShowHint(newState);
@@ -52,643 +157,194 @@ function App() {
   };
 
   const handleExport = async (startDate: string, endDate: string) => {
-    try { await exportToExcel(tasks, assignments, startDate, endDate); setShowExportModal(false); }
-    catch (error) { console.error('Export error:', error); alert('Ошибка при экспорте: ' + (error as Error).message); }
+    try {
+      await exportToExcel(tasks, assignments, startDate, endDate);
+      setShowExportModal(false);
+    } catch (error) {
+      console.error('Export error:', error);
+      alert('Ошибка при экспорте: ' + (error as Error).message);
+    }
   };
 
-  // const handleRedmineImport = (importedTasks: Task[]) => {
-  //   setTasks((prev) => [...prev, ...importedTasks]);
-  // };
-
-  useEffect(() => {
-    const savedLogin = localStorage.getItem('planner-current-user');
-    if (savedLogin) {
-      try {
-        const profiles = JSON.parse(localStorage.getItem('planner-profiles') || '[]');
-        const profile = profiles.find((p: Profile) => p.login === savedLogin);
-        if (profile) { setCurrentUser(profile); setCurrentProfile(profile); }
-      } catch (e) { console.error('Error loading profile:', e); }
-    }
-    setAuthChecked(true);
-    
-    // Загрузка настроек Redmine
-    // const settings = getRedmineSettings();
-    // if (settings) setRedmineSettings(settings);
-  }, []);
-
-  useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth < 768);
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
-
-  useEffect(() => {
-    async function loadData() {
-      if (!currentUser) { setIsLoading(false); return; }
-      try {
-        const [savedTasks, savedAssignments] = await Promise.all([loadTasks(), loadAssignments()]);
-        if (savedTasks.length > 0) setTasks(savedTasks);
-        if (savedAssignments.length > 0) setAssignments(savedAssignments);
-        const savedDayStatuses = localStorage.getItem(`planner-day-statuses-${currentUser.login}`);
-        if (savedDayStatuses) setDayStatuses(JSON.parse(savedDayStatuses));
-      } catch (error) { console.error('Error loading ', error); }
-      finally { setIsLoading(false); }
-    }
-    if (authChecked) loadData();
-  }, [currentUser, authChecked]);
-
-  useEffect(() => { if (!isLoading && currentUser) saveTasks(tasks); }, [tasks, isLoading, currentUser]);
-  useEffect(() => { if (!isLoading && currentUser) saveAssignments(assignments); }, [assignments, isLoading, currentUser]);
-
-  const weeksContainerRef = useRef<HTMLDivElement>(null);
-  const currentWeekRef = useRef<HTMLDivElement | null>(null);
-
-  const weeks = useMemo(() => {
-    // Лента содержит ТОЛЬКО текущий год — без 2025 и 2027.
-    const allWeeks: Week[] = [];
-    for (const year of [currentYear]) {
-      for (let month = 0; month < 12; month++) {
-        allWeeks.push(...getMonthWeeks(year, month));
-      }
-    }
-    // Дедупликация по дате понедельника: одна физическая неделя не должна
-    // встречаться в списке дважды (раньше из-за этого ломались id и скролл).
-    const seen = new Set<string>();
-    const uniqueWeeks = allWeeks.filter((week) => {
-      const key = formatDateKey(new Date(week.days[0].date));
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    // Гарантируем строго хронологический порядок — независим от порядка генерации.
-    uniqueWeeks.sort((a, b) => new Date(a.days[0].date).getTime() - new Date(b.days[0].date).getTime());
-    return uniqueWeeks;
-  }, [currentYear]);
-
-  const currentWeekId = useMemo(() => {
-    // Сравниваем по календарной дате (год/месяц/число), а не через toDateString,
-    // чтобы поиск текущей недели не зависел от времени суток и таймзоны.
-    const todayKey = formatDateKey(new Date());
-    const week = weeks.find(w => w.days.some(day => formatDateKey(new Date(day.date)) === todayKey));
-    return week?.id || null;
-  }, [weeks]);
-
-  const weeksRef = useRef(weeks);
-  const visibleMonthRef = useRef(visibleMonth);
-  // Пока при первом открытии не выполнилась автопрокрутка к текущей неделе,
-  // обработчик скролла не должен менять заголовок месяца.
-  const autoScrollPendingRef = useRef(true);
-  useEffect(() => { weeksRef.current = weeks; visibleMonthRef.current = visibleMonth; }, [weeks, visibleMonth]);
-  useEffect(() => { autoScrollPendingRef.current = shouldScrollToCurrentWeek; }, [shouldScrollToCurrentWeek]);
-
-  // Эффект привязывает ref текущей недели после коммита DOM (гарантированно актуальный элемент)
-  useEffect(() => {
-    if (!currentWeekId) { currentWeekRef.current = null; return; }
-    const el = document.getElementById(`week-${currentWeekId}`);
-    currentWeekRef.current = el as HTMLDivElement | null;
-  }, [weeks, currentWeekId]);
-
-  // ===== ДИАГНОСТИКА АВТОСКРОЛЛА =====
-  // Работает БЕЗ предварительной настройки: при каждом открытии страницы пишет
-  // один компактный отчёт в консоль браузера (F12 -> Console), префикс [autoscroll].
-  // Дополнительно можно вручную вызвать window.__plannerCheck() в любой момент.
-  useEffect(() => {
-    const report = (source: string) => {
-      const container = weeksContainerRef.current;
-      const el = currentWeekId ? document.getElementById(`week-${currentWeekId}`) : null;
-      const lines: string[] = [];
-      lines.push(`[${source}] container: ${container ? `есть (scrollHeight=${container.scrollHeight}, clientHeight=${container.clientHeight}, scrollTop=${Math.round(container.scrollTop)})` : 'НЕТ'}`);
-      lines.push(`текущая неделя id=${JSON.stringify(currentWeekId)}, элемент в DOM: ${el ? `есть (offsetTop=${el.offsetTop}, высота=${el.offsetHeight})` : 'НЕТ'}`);
-      if (el && container) {
-        const contRect = container.getBoundingClientRect();
-        const elRect = el.getBoundingClientRect();
-        lines.push(`позиция: rect.top элемента=${Math.round(elRect.top)}, rect.top контейнера=${Math.round(contRect.top)}, целевой scrollTop=${Math.max(0, Math.round(container.scrollTop + (elRect.top - contRect.top)))}`);
-      }
-      const scr = getComputedStyle(document.documentElement).overflowY;
-      const bdy = getComputedStyle(document.body).overflowY;
-      lines.push(`css overflow: html=${scr}, body=${bdy} (если «hidden» — окно не скроллится, скролл должен идти внутри контейнера ленты)`);
-      console.log('[autoscroll] ' + lines.join(' | '));
-    };
-    (window as any).__plannerCheck = () => report('ручная проверка');
-    const t1 = setTimeout(() => report('загрузка+800мс'), 800);
-    const t2 = setTimeout(() => report('загрузка+2500мс'), 2500);
-    return () => { clearTimeout(t1); clearTimeout(t2); };
-  }, [currentWeekId]);
-  // ===== КОНЕЦ ДИАГНОСТИКИ =====
-
-  // Месяц, которому принадлежит неделя (большинство из 5 рабочих дней недели).
-  const getWeekDominantMonth = useCallback((week: Week): { month: number; year: number } => {
-    const monthCounts: Record<string, number> = {};
-    week.days.forEach(day => {
-      const dayDate = new Date(day.date);
-      const key = `${dayDate.getFullYear()}-${dayDate.getMonth()}`;
-      monthCounts[key] = (monthCounts[key] || 0) + 1;
-    });
-    let maxMonth = '', maxCount = 0;
-    Object.entries(monthCounts).forEach(([key, count]) => { if (count > maxCount) { maxCount = count; maxMonth = key; } });
-    const [yearStr, monthStr] = maxMonth.split('-');
-    return { month: parseInt(monthStr), year: parseInt(yearStr) };
-  }, []);
-
-  // Прокрутка контейнера ленты к неделе.
-  // Позиция считается из getBoundingClientRect (абсолютные координаты элемента
-  // внутри контейнера) — offsetTop мог давать неверное значение, если у какого-то
-  // из общих родителей был position !== static.
-  const scrollContainerToWeek = useCallback((container: HTMLElement, weekElement: HTMLElement) => {
-    const contRect = container.getBoundingClientRect();
-    const elRect = weekElement.getBoundingClientRect();
-    // Компенсация sticky-шапки: неделя встаёт на 90px ниже верха контейнера.
-    const targetTop = Math.max(0, container.scrollTop + (elRect.top - contRect.top) - 90);
-    container.scrollTop = targetTop;
-    return targetTop;
-  }, []);
-
-  // Одна попытка автоскролла за сессию к текущей неделе.
-  // Ключевое исправление: подписка на ResizeObserver контейнера. Данные задач
-  // подгружаются асинхронно, лента «растёт» после первоначального скролла и
-  // позиция съезжала обратно к январю. RO ловит каждый такой рост и заново
-  // прокручивает к текущей неделе, пока пользователь сам не тронет прокрутку.
-  useEffect(() => {
-    if (!shouldScrollToCurrentWeek) return;
-
-    let cancelled = false;
-    let ro: ResizeObserver | null = null;
-    let userScrolled = false;
-    let finished = false;
-    const startTs = performance.now();
-
-    const finish = () => {
-      if (finished || cancelled) return;
-      finished = true;
-      const week = weeksRef.current.find(w => w.id === currentWeekId);
-      if (week) setVisibleMonth(getWeekDominantMonth(week));
-      setShouldScrollToCurrentWeek(false);
-    };
-
-    const doScroll = (): boolean => {
-      const container = weeksContainerRef.current;
-      const weekElement = currentWeekId ? document.getElementById(`week-${currentWeekId}`) : null;
-      if (!container || !weekElement || weekElement.offsetHeight <= 0) return false;
-      scrollContainerToWeek(container, weekElement);
-      return true;
-    };
-
-    const attach = () => {
-      if (cancelled) return;
-      const container = weeksContainerRef.current;
-      if (!container) {
-        if (performance.now() - startTs < 5000) requestAnimationFrame(attach);
-        return;
-      }
-
-      // Первый скролл — сразу, как только контейнер в DOM.
-      doScroll();
-
-      // Повторяем скролл при каждом изменении размеров ленты (загрузка данных,
-      // ре-рендеры карточек) — это и чинит «откат» к январю.
-      ro = new ResizeObserver(() => {
-        if (userScrolled || cancelled) return;
-        doScroll();
+  const setDayStatus = useCallback(
+    (dayId: string, status: 'vacation' | 'holiday' | 'short' | 'working', hours?: number) => {
+      setDayStatuses((prev) => {
+        const updated = { ...prev };
+        if (status === 'working') delete updated[dayId];
+        else if (status === 'short') updated[dayId] = { status: 'short', hours };
+        else updated[dayId] = { status };
+        localStorage.setItem(`planner-day-statuses-${currentUser?.login}`, JSON.stringify(updated));
+        return updated;
       });
-      ro.observe(container);
+    },
+    [currentUser],
+  );
 
-      // Если пользователь сам начал крутить — перестаём навязывать позицию.
-      const onWheelOrTouch = () => { userScrolled = true; };
-      container.addEventListener('wheel', onWheelOrTouch, { passive: true });
-      container.addEventListener('touchmove', onWheelOrTouch, { passive: true });
+  const handleSaveTask = useCallback(
+    (updatedTask: Task) => {
+      board.editTask(updatedTask);
+      setEditingTask(null);
+    },
+    [board],
+  );
 
-      // Страховка: держим позицию ещё пару секунд кадрами, затем завершаем.
-      const holdUntil = performance.now() + 2000;
-      const hold = () => {
-        if (cancelled || userScrolled) { finish(); return; }
-        doScroll();
-        if (performance.now() < holdUntil) requestAnimationFrame(hold);
-        else finish();
-      };
-      requestAnimationFrame(hold);
-    };
-    attach();
-
-    return () => {
-      cancelled = true;
-      ro?.disconnect();
-    };
-  }, [shouldScrollToCurrentWeek, currentWeekId, getWeekDominantMonth, scrollContainerToWeek]);
-
-  useEffect(() => {
-    const attachScrollHandler = () => {
-      const container = weeksContainerRef.current;
-      if (!container) { requestAnimationFrame(attachScrollHandler); return; }
-      const handleScroll = () => {
-        // Пока не выполнилась автопрокрутка при первом открытии, заголовок
-        // не трогаем — иначе он «прыгнет» на январь до скролла к текущей неделе.
-        if (autoScrollPendingRef.current) return;
-        const containerRect = container.getBoundingClientRect();
-        const probeY = containerRect.top + Math.min(100, containerRect.height / 2);
-        let activeWeek: Week | undefined;
-        for (const week of weeksRef.current) {
-          const weekElement = document.getElementById(`week-${week.id}`);
-          if (!weekElement) continue;
-          const rect = weekElement.getBoundingClientRect();
-          if (rect.top <= probeY && rect.bottom > probeY) { activeWeek = week; break; }
-        }
-        if (activeWeek) {
-          const visible = getWeekDominantMonth(activeWeek);
-          const currentVisibleMonth = visibleMonthRef.current;
-          if (visible.month !== currentVisibleMonth.month || visible.year !== currentVisibleMonth.year) {
-            setVisibleMonth(visible);
-          }
-        }
-      };
-      container.addEventListener('scroll', handleScroll, { passive: true });
-      (container as any)._scrollHandler = handleScroll;
-    };
-    attachScrollHandler();
-    return () => {
-      const container = weeksContainerRef.current;
-      if (container && (container as any)._scrollHandler) {
-        container.removeEventListener('scroll', (container as any)._scrollHandler);
-        delete (container as any)._scrollHandler;
-      }
-    };
-  }, [getWeekDominantMonth]);
-
-  const scrollToMonth = (direction: -1 | 1) => {
-    const container = weeksContainerRef.current;
-    if (!container) return;
-    let targetMonth = visibleMonth.month + direction;
-    let targetYear = visibleMonth.year;
-    if (targetMonth < 0) { targetMonth = 11; targetYear--; }
-    else if (targetMonth > 11) { targetMonth = 0; targetYear++; }
-    // Ищем первую неделю, у которой БОЛЬШИНСТВО дней относится к целевому месяцу —
-    // иначе переход мог приземляться на «хвост» соседнего месяца.
-    const targetWeek = weeks.find(week => {
-      const inMonth = week.days.filter(d => {
-        const dayDate = new Date(d.date);
-        return dayDate.getMonth() === targetMonth && dayDate.getFullYear() === targetYear;
-      }).length;
-      return inMonth >= 3;
-    });
-    if (targetWeek) {
-      const weekElement = document.getElementById(`week-${targetWeek.id}`);
-      if (weekElement) {
-        scrollContainerToWeek(container, weekElement);
-        setVisibleMonth({ month: targetMonth, year: targetYear });
-      }
-    }
+  const handleLogin = (profile: Profile) => {
+    setCurrentUser(profile);
+    setCurrentProfile(profile);
+    localStorage.setItem('planner-current-user', profile.login);
+    setIsLoading(true);
   };
 
-  const addTask = useCallback((task: Task) => { setTasks((prev) => [...prev, task]); }, []);
-  const deleteTask = useCallback((taskId: string) => { setTasks((prev) => prev.filter((t) => t.id !== taskId)); setAssignments((prev) => prev.filter((a) => a.taskId !== taskId)); }, []);
-  const completeTask = useCallback((taskId: string) => { setTasks((prev) => prev.map(t => t.id === taskId ? { ...t, status: 'completed' as const, completedAt: new Date().toISOString() } : t)); }, []);
-  const returnToNew = useCallback((taskId: string, additionalHours: number) => {
-    const alreadyAssigned = assignments.filter(a => a.taskId === taskId).reduce((sum, a) => sum + a.hours, 0);
-    const newTotalHours = alreadyAssigned + additionalHours;
-    setTasks((prev) => prev.map(t => t.id === taskId ? { ...t, status: 'new' as const, completedAt: undefined, totalHours: newTotalHours } : t));
-  }, [assignments]);
-  const editTask = useCallback((updatedTask: Task) => { setTasks((prev) => prev.map(t => t.id === updatedTask.id ? updatedTask : t)); setEditingTask(null); }, []);
-  const setDayStatus = useCallback((dayId: string, status: 'vacation' | 'holiday' | 'short' | 'working', hours?: number) => {
-    setDayStatuses((prev) => {
-      const updated = { ...prev };
-      if (status === 'working') delete updated[dayId];
-      else if (status === 'short') updated[dayId] = { status: 'short', hours };
-      else updated[dayId] = { status };
-      localStorage.setItem(`planner-day-statuses-${currentUser?.login}`, JSON.stringify(updated));
-      return updated;
-    });
-  }, [currentUser]);
-  const splitAssignment = useCallback((assignmentId: string, hoursToSplit: number) => {
-    const assignment = assignments.find((a) => a.id === assignmentId);
-    if (!assignment || hoursToSplit <= 0 || hoursToSplit >= assignment.hours) return;
-    const rest = assignment.hours - hoursToSplit;
-    setAssignments((prev) => { const filtered = prev.filter((a) => a.id !== assignmentId); return [...filtered, { ...assignment, hours: hoursToSplit }, { ...assignment, id: generateId(), hours: rest, order: assignment.order + 0.5 }]; });
-  }, [assignments]);
-  const removeAssignment = useCallback((assignmentId: string) => { setAssignments((prev) => prev.filter((a) => a.id !== assignmentId)); }, []);
-  const moveAssignment = useCallback((assignmentId: string, newDayId: string) => {
-    setAssignments((prev) => { const assignment = prev.find(a => a.id === assignmentId); if (!assignment) return prev; const maxOrder = prev.filter((a) => a.dayId === newDayId).reduce((max, a) => Math.max(max, a.order), 0); return prev.map(a => a.id === assignmentId ? { ...a, dayId: newDayId, order: maxOrder + 1 } : a); });
-  }, []);
-  const reorderAssignment = useCallback((sourceId: string, targetId: string) => {
-    setAssignments((prev) => { const source = prev.find(a => a.id === sourceId); const target = prev.find(a => a.id === targetId); if (!source || !target) return prev; return prev.map(a => { if (a.id === sourceId) return { ...a, order: target.order }; if (a.id === targetId) return { ...a, order: source.order }; return a; }); });
-  }, []);
-  const mergeAssignments = useCallback((sourceId: string, targetId: string) => {
-    setAssignments((prev) => { const source = prev.find(a => a.id === sourceId); const target = prev.find(a => a.id === targetId); if (!source || !target) return prev; if (source.taskId !== target.taskId) return prev; const newHours = source.hours + target.hours; return prev.filter(a => a.id !== sourceId).map(a => a.id === targetId ? { ...a, hours: newHours } : a); });
-  }, []);
-  const dropTask = useCallback((taskId: string, dayId: string, hours: number) => {
-    const existing = assignments.find((a) => a.taskId === taskId && a.dayId === dayId);
-    if (existing) { const dayTotal = assignments.filter((a) => a.dayId === dayId).reduce((sum, a) => sum + a.hours, 0); if (dayTotal + hours <= HOURS_PER_DAY) setAssignments((prev) => prev.map((a) => a.id === existing.id ? { ...a, hours: a.hours + hours } : a)); return; }
-    const dayTotal = assignments.filter((a) => a.dayId === dayId).reduce((sum, a) => sum + a.hours, 0);
-    if (dayTotal + hours > HOURS_PER_DAY) return;
-    const maxOrder = assignments.filter((a) => a.dayId === dayId).reduce((max, a) => Math.max(max, a.order), 0);
-    setAssignments((prev) => [...prev, { id: generateId(), taskId, dayId, hours, order: maxOrder + 1 }]);
-  }, [assignments]);
+  const handleSignOut = () => {
+    setCurrentUser(null);
+    setCurrentProfile(null);
+    localStorage.removeItem('planner-current-user');
+    board.resetBoard();
+  };
 
-  const totalTaskHours = tasks.reduce((sum, t) => sum + t.totalHours, 0);
-
-  const totalAssignedHours = useMemo(() => {
-    return assignments.reduce((sum, a) => {
-      const dayId = a.dayId;
-      const dayDateStr = dayId.replace('day-', '');
-      const dayDate = new Date(dayDateStr);
-      const isCurrentMonth = dayDate.getMonth() === currentMonth && dayDate.getFullYear() === currentYear;
-      const dayStatus = dayStatuses[dayId];
-      const isVacationOrHoliday = dayStatus?.status === 'vacation' || dayStatus?.status === 'holiday';
-      return (isCurrentMonth && !isVacationOrHoliday) ? sum + a.hours : sum;
-    }, 0);
-  }, [assignments, currentMonth, currentYear, dayStatuses]);
-
-  const totalWorkingHours = useMemo(() => {
-    const currentMonthWeeks = getMonthWeeks(currentYear, currentMonth);
-    return currentMonthWeeks.reduce((total, week) => {
-      return total + week.days.reduce((dayTotal, day) => {
-        const dayDate = new Date(day.date);
-        const isCurrentMonth = dayDate.getMonth() === currentMonth && dayDate.getFullYear() === currentYear;
-        if (!isCurrentMonth || !day.isWorkingDay) return dayTotal;
-        const dayStatus = dayStatuses[day.id];
-        if (dayStatus?.status === 'vacation' || dayStatus?.status === 'holiday') return dayTotal;
-        if (dayStatus?.status === 'short' && dayStatus.hours) return dayTotal + dayStatus.hours;
-        return dayTotal + HOURS_PER_DAY;
-      }, 0);
-    }, 0);
-  }, [currentYear, currentMonth, dayStatuses]);
-
-  const remainingWorkingHours = totalWorkingHours - totalAssignedHours;
-  const getTaskAssignedHours = (taskId: string) => assignments.filter((a) => a.taskId === taskId).reduce((sum, a) => sum + a.hours, 0);
-
-  const filteredTasks = useMemo(() => {
-    return tasks.filter(task => {
-      if (statusFilter === 'new' && task.status === 'completed') return false;
-      if (statusFilter === 'completed' && task.status !== 'completed') return false;
-      if (searchQuery) { const query = searchQuery.toLowerCase(); return task.title.toLowerCase().includes(query); }
-      return true;
-    });
-  }, [tasks, statusFilter, searchQuery]);
-
-  const handleLogin = (profile: Profile) => { setCurrentUser(profile); setCurrentProfile(profile); localStorage.setItem('planner-current-user', profile.login); setIsLoading(true); };
-  const handleSignOut = () => { setCurrentUser(null); setCurrentProfile(null); localStorage.removeItem('planner-current-user'); setTasks([]); setAssignments([]); };
-
-  if (!authChecked) return (<div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.bgPrimary }}><div style={{ textAlign: 'center' }}><div style={{ width: 48, height: 48, border: `4px solid ${theme.borderPrimary}`, borderTopColor: theme.accent1, borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' }}></div><p style={{ color: theme.textSecondary, fontWeight: 500 }}>Загрузка...</p></div></div>);
+  // ── Экраны загрузки / авторизации ────────────────────────────────────
+  if (!authChecked) return <Spinner label="Загрузка..." />;
   if (!currentUser) return <AuthScreen onLogin={handleLogin} />;
-  if (isLoading) return (<div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: theme.bgPrimary }}><div style={{ textAlign: 'center' }}><div style={{ width: 48, height: 48, border: `4px solid ${theme.borderPrimary}`, borderTopColor: theme.accent1, borderRadius: '50%', animation: 'spin 1s linear infinite', margin: '0 auto 16px' }}></div><p style={{ color: theme.textSecondary, fontWeight: 500 }}>Загрузка данных...</p></div></div>);
+  if (isLoading) return <Spinner label="Загрузка данных..." />;
 
   return (
     <div style={{ minHeight: '100vh', background: theme.bgPrimary, transition: 'background 0.3s ease' }}>
-      <header style={{ position: 'sticky', top: 0, zIndex: 30, background: `${theme.bgCard}ee`, backdropFilter: 'blur(12px)', borderBottom: `1px solid ${theme.borderPrimary}` }}>
-        <div style={{ maxWidth: 1800, margin: '0 auto', padding: isMobile ? '8px 12px' : '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: isMobile ? 8 : 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 8 : 16 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <div style={{ width: isMobile ? 28 : 32, height: isMobile ? 28 : 32, borderRadius: 8, background: theme.accent1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <svg width={isMobile ? 16 : 20} height={isMobile ? 16 : 20} fill="none" stroke="white" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-              </div>
-              {!isMobile && <h1 style={{ fontSize: 18, fontWeight: 700, color: theme.textPrimary, margin: 0 }}>Твой планировщик</h1>}
-            </div>
-          </div>
+      <Header
+        isMobile={isMobile}
+        visibleMonth={visibleMonth}
+        monthName={getMonthName(visibleMonth.month)}
+        displayName={currentUser.displayName}
+        showHint={showHint}
+        mode={mode}
+        newTasksCount={activeTasks.length}
+        newTasksHours={newTasksTotalHours}
+        remainingWorkingHours={remainingWorkingHours}
+        totalWorkingHours={totalWorkingHours}
+        onPrevMonth={() => scrollToMonth(-1)}
+        onNextMonth={() => scrollToMonth(1)}
+        onToggleHint={toggleHint}
+        onOpenExport={() => setShowExportModal(true)}
+        onToggleTheme={toggleTheme}
+        onSignOut={handleSignOut}
+      />
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 4 : 8 }}>
-            <button onClick={() => scrollToMonth(-1)} style={{ padding: isMobile ? 6 : 8, borderRadius: 8, border: 'none', cursor: 'pointer', background: 'transparent', color: theme.textSecondary }}>
-              <svg width={isMobile ? 16 : 20} height={isMobile ? 16 : 20} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+      <div
+        style={{
+          maxWidth: 1800,
+          margin: '0 auto',
+          display: 'flex',
+          gap: isMobile ? 0 : 16,
+          padding: isMobile ? 8 : 16,
+          flexDirection: isMobile ? 'column' : 'row',
+        }}
+      >
+        {/* Плавающая кнопка открытия сайдбара на мобильных */}
+        {isMobile && (
+          <button
+            onClick={() => setShowSidebar(!showSidebar)}
+            style={{
+              position: 'fixed',
+              bottom: 20,
+              right: 20,
+              width: 56,
+              height: 56,
+              borderRadius: '50%',
+              background: theme.accent1,
+              color: '#fff',
+              border: 'none',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+              cursor: 'pointer',
+              zIndex: 100,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+          </button>
+        )}
+
+        <aside
+          style={{
+            width: isMobile ? '100%' : isSidebarCollapsed ? '5%' : 288,
+            flexShrink: 0,
+            display: isMobile && !showSidebar ? 'none' : 'flex',
+            flexDirection: 'column',
+            gap: 16,
+            position: isMobile ? 'fixed' : 'sticky',
+            top: isMobile ? 0 : 72,
+            left: isMobile ? 0 : undefined,
+            right: isMobile ? 0 : undefined,
+            bottom: isMobile ? 0 : undefined,
+            background: isMobile ? theme.bgPrimary : 'transparent',
+            zIndex: isMobile ? 99 : 1,
+            padding: isMobile ? 16 : 0,
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            maxHeight: isMobile ? '100vh' : 'calc(100vh - 88px)',
+            transition: 'width 0.3s ease',
+          }}
+        >
+          {isMobile && (
+            <button
+              onClick={() => setShowSidebar(false)}
+              style={{
+                alignSelf: 'flex-end',
+                padding: 8,
+                borderRadius: 8,
+                border: 'none',
+                background: theme.bgSecondary,
+                color: theme.textSecondary,
+                cursor: 'pointer',
+                marginBottom: 8,
+              }}
+            >
+              <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
             </button>
-            <h2 style={{ fontSize: isMobile ? 14 : 16, fontWeight: 600, color: theme.textPrimary, minWidth: isMobile ? 120 : 160, textAlign: 'center', margin: 0 }}>{getMonthName(visibleMonth.month)} {visibleMonth.year}</h2>
-            <button onClick={() => scrollToMonth(1)} style={{ padding: isMobile ? 6 : 8, borderRadius: 8, border: 'none', cursor: 'pointer', background: 'transparent', color: theme.textSecondary }}>
-              <svg width={isMobile ? 16 : 20} height={isMobile ? 16 : 20} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
-            </button>
-          </div>
+          )}
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            {!showHint && <button onClick={toggleHint} style={{ padding: 8, borderRadius: 8, border: `1px solid ${theme.borderPrimary}`, background: theme.bgSecondary, color: theme.textSecondary, cursor: 'pointer', display: 'flex', alignItems: 'center' }} title="Показать подсказку"><svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" /></svg></button>}
-            <button onClick={() => setShowExportModal(true)} style={{ padding: 8, borderRadius: 8, border: `1px solid ${theme.borderPrimary}`, background: theme.bgSecondary, color: theme.textSecondary, cursor: 'pointer', display: 'flex', alignItems: 'center' }} title="Экспорт в Excel"><svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg></button>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <svg width="16" height="16" fill="none" stroke={theme.textTertiary} viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path strokeLinecap="round" d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-              <button onClick={toggleTheme} style={{ width: 44, height: 24, borderRadius: 12, border: 'none', background: mode === 'dark' ? theme.accent1 : theme.bgTertiary, cursor: 'pointer', position: 'relative', transition: 'background 0.3s ease' }}><div style={{ width: 18, height: 18, borderRadius: '50%', background: '#fff', position: 'absolute', top: 3, left: mode === 'dark' ? 23 : 3, transition: 'left 0.3s ease', boxShadow: '0 2px 4px rgba(0,0,0,0.2)' }}/></button>
-              <svg width="16" height="16" fill="none" stroke={theme.textTertiary} viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? 4 : 8 }}>
-              {!isMobile && <div style={{ textAlign: 'right' }}><div style={{ fontSize: 12, color: theme.textTertiary }}>Профиль</div><div style={{ fontSize: 14, fontWeight: 600, color: theme.textPrimary }}>{currentUser.displayName}</div></div>}
-              <button onClick={handleSignOut} style={{ padding: 8, borderRadius: 8, border: `1px solid ${theme.borderPrimary}`, background: theme.bgSecondary, color: theme.textSecondary, cursor: 'pointer' }} title="Выйти"><svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg></button>
-            </div>
-            {!isMobile && <div style={{ textAlign: 'right' }}><div style={{ fontSize: 12, color: theme.textTertiary }}>Новые задачи</div><div style={{ fontSize: 14, fontWeight: 700, color: theme.textPrimary }}>{tasks.filter(t => t.status !== 'completed').length} шт / {formatHours(tasks.filter(t => t.status !== 'completed').reduce((sum, t) => sum + t.totalHours, 0))}</div></div>}
-            {!isMobile && <div style={{ textAlign: 'right' }}><div style={{ fontSize: 12, color: theme.textTertiary }}>Рабочее время</div><div style={{ fontSize: 14, fontWeight: 700, color: remainingWorkingHours > 0 ? theme.accent4 : theme.accent2 }}>{formatHours(remainingWorkingHours)} / {formatHours(totalWorkingHours)}</div></div>}
-          </div>
-        </div>
-      </header>
-
-      <div style={{ maxWidth: 1800, margin: '0 auto', display: 'flex', gap: isMobile ? 0 : 16, padding: isMobile ? 8 : 16, flexDirection: isMobile ? 'column' : 'row' }}>
-        {isMobile && <button onClick={() => setShowSidebar(!showSidebar)} style={{ position: 'fixed', bottom: 20, right: 20, width: 56, height: 56, borderRadius: '50%', background: theme.accent1, color: '#fff', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.15)', cursor: 'pointer', zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center' }}><svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" /></svg></button>}
-        <aside style={{ 
-          width: isMobile ? '100%' : (isSidebarCollapsed ? '5%' : 288), 
-          flexShrink: 0, 
-          display: isMobile && !showSidebar ? 'none' : 'flex', 
-          flexDirection: 'column', 
-          gap: 16, 
-          position: isMobile ? 'fixed' : 'sticky', 
-          top: isMobile ? 0 : 72, 
-          left: isMobile ? 0 : undefined, 
-          right: isMobile ? 0 : undefined, 
-          bottom: isMobile ? 0 : undefined, 
-          background: isMobile ? theme.bgPrimary : 'transparent', 
-          zIndex: isMobile ? 99 : 1, 
-          padding: isMobile ? 16 : 0, 
-          overflowY: 'auto', 
-          overflowX: 'hidden',
-          maxHeight: isMobile ? '100vh' : 'calc(100vh - 88px)',
-          transition: 'width 0.3s ease'
-        }}>
-          {isMobile && <button onClick={() => setShowSidebar(false)} style={{ alignSelf: 'flex-end', padding: 8, borderRadius: 8, border: 'none', background: theme.bgSecondary, color: theme.textSecondary, cursor: 'pointer', marginBottom: 8 }}><svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>}
-          
-          {/* Свёрнутое состояние - только иконки */}
           {isSidebarCollapsed && !isMobile ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16, alignItems: 'center' }}>
-              {/* Кнопка разворачивания */}
-              <button 
-                onClick={() => setIsSidebarCollapsed(false)}
-                style={{ 
-                  background: theme.bgCard, 
-                  borderRadius: 12, 
-                  border: `1px solid ${theme.borderPrimary}`, 
-                  padding: 12, 
-                  boxShadow: theme.shadow,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  transition: 'all 0.2s'
-                }}
-                onMouseEnter={e => {
-                  e.currentTarget.style.background = theme.bgHover;
-                }}
-                onMouseLeave={e => {
-                  e.currentTarget.style.background = theme.bgCard;
-                }}
-                title="Развернуть панель"
-              >
-                <svg width="20" height="20" fill="none" stroke={theme.accent1} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-                </svg>
-              </button>
-              
-              {/* Иконка "Мои задачи" — просто разворачивает панель (форма остаётся свёрнутой) */}
-              <button
-                onClick={() => { setIsSidebarCollapsed(false); }}
-                style={{
-                  background: theme.bgCard,
-                  borderRadius: 12,
-                  border: `1px solid ${theme.borderPrimary}`,
-                  padding: 12,
-                  boxShadow: theme.shadow,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  transition: 'all 0.2s'
-                }}
-                onMouseEnter={e => { e.currentTarget.style.background = theme.bgHover; }}
-                onMouseLeave={e => { e.currentTarget.style.background = theme.bgCard; }}
-                title="Мои задачи (развернуть панель и создать задачу)"
-              >
-                <svg width="20" height="20" fill="none" stroke={theme.accent1} viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                </svg>
-              </button>
-              
-              {/* Иконка поиска — разворачивает панель (поиск остаётся свёрнутым, как и другие разделы) */}
-              <button
-                onClick={() => { setIsSidebarCollapsed(false); }}
-                style={{
-                  background: theme.bgCard,
-                  borderRadius: 12,
-                  border: `1px solid ${theme.borderPrimary}`,
-                  padding: 12,
-                  boxShadow: theme.shadow,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  transition: 'all 0.2s'
-                }}
-                onMouseEnter={e => { e.currentTarget.style.background = theme.bgHover; }}
-                onMouseLeave={e => { e.currentTarget.style.background = theme.bgCard; }}
-                title="Поиск и фильтры (развернуть панель)"
-              >
-                <svg width="20" height="20" fill="none" stroke={theme.accent1} viewBox="0 0 24 24">
-                  <circle cx="11" cy="11" r="8" />
-                  <path strokeLinecap="round" d="M21 21l-4.35-4.35" />
-                </svg>
-              </button>
-              
-              {/* Иконка "Новые задачи" — разворачивает панель к списку новых задач */}
-              {tasks.filter(t => t.status !== 'completed').length > 0 && (
-                <button
-                  onClick={() => { setIsSidebarCollapsed(false); }}
-                  style={{
-                    background: theme.bgCard,
-                    borderRadius: 12,
-                    border: `1px solid ${theme.borderPrimary}`,
-                    padding: 12,
-                    boxShadow: theme.shadow,
-                    position: 'relative',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    transition: 'all 0.2s'
-                  }}
-                  onMouseEnter={e => { e.currentTarget.style.background = theme.bgHover; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = theme.bgCard; }}
-                  title={`Новые задачи: ${tasks.filter(t => t.status !== 'completed').length} (развернуть панель)`}
-                >
-                  <svg width="20" height="20" fill="none" stroke={theme.accent1} viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-                  </svg>
-                  <span style={{
-                    position: 'absolute',
-                    top: -4,
-                    right: -4,
-                    background: theme.accent1,
-                    color: '#fff',
-                    borderRadius: '50%',
-                    width: 18,
-                    height: 18,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: 10,
-                    fontWeight: 600,
-                    pointerEvents: 'none'
-                  }}>
-                    {tasks.filter(t => t.status !== 'completed').length}
-                  </span>
-                </button>
-              )}
-              
-              {/* Иконка "Выполненные задачи" — разворачивает панель; счётчик всегда по всем выполненным */}
-              {tasks.filter(t => t.status === 'completed').length > 0 && (
-                <button
-                  onClick={() => { setIsSidebarCollapsed(false); }}
-                  style={{
-                    background: theme.bgCard,
-                    borderRadius: 12,
-                    border: `1px solid ${theme.borderPrimary}`,
-                    padding: 12,
-                    boxShadow: theme.shadow,
-                    position: 'relative',
-                    cursor: 'pointer',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    transition: 'all 0.2s'
-                  }}
-                  onMouseEnter={e => { e.currentTarget.style.background = theme.bgHover; }}
-                  onMouseLeave={e => { e.currentTarget.style.background = theme.bgCard; }}
-                  title={`Выполненные задачи: ${tasks.filter(t => t.status === 'completed').length} (развернуть панель)`}
-                >
-                  <svg width="20" height="20" fill="none" stroke={theme.success} viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <span style={{
-                    position: 'absolute',
-                    top: -4,
-                    right: -4,
-                    background: theme.success,
-                    color: '#fff',
-                    borderRadius: '50%',
-                    width: 18,
-                    height: 18,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: 10,
-                    fontWeight: 600,
-                    pointerEvents: 'none'
-                  }}>
-                    {tasks.filter(t => t.status === 'completed').length}
-                  </span>
-                </button>
-              )}
-            </div>
+            <SidebarCollapsed
+              newTaskCount={activeTasks.length}
+              completedTaskCount={completedCount}
+              onExpand={() => setIsSidebarCollapsed(false)}
+            />
           ) : (
-            /* Развёрнутое состояние - полная панель */
             <>
-              <div style={{ background: theme.bgCard, borderRadius: 16, border: `1px solid ${theme.borderPrimary}`, padding: 16, boxShadow: theme.shadow }}>
+              <div
+                style={{
+                  background: theme.bgCard,
+                  borderRadius: 16,
+                  border: `1px solid ${theme.borderPrimary}`,
+                  padding: 16,
+                  boxShadow: theme.shadow,
+                }}
+              >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
                   <h3 style={{ fontSize: 14, fontWeight: 600, color: theme.textPrimary, margin: 0 }}>Мои задачи</h3>
-                  <button 
+                  <button
                     onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-                    style={{ 
-                      padding: 4, 
-                      borderRadius: 6, 
-                      border: 'none', 
-                      background: 'transparent', 
-                      color: theme.textTertiary, 
+                    style={{
+                      padding: 4,
+                      borderRadius: 6,
+                      border: 'none',
+                      background: 'transparent',
+                      color: theme.textTertiary,
                       cursor: 'pointer',
                       display: 'flex',
                       alignItems: 'center',
                       justifyContent: 'center',
-                      transition: 'all 0.2s'
+                      transition: 'all 0.2s',
                     }}
-                    onMouseEnter={e => {
+                    onMouseEnter={(e) => {
                       e.currentTarget.style.background = theme.bgHover;
                       e.currentTarget.style.color = theme.textPrimary;
                     }}
-                    onMouseLeave={e => {
+                    onMouseLeave={(e) => {
                       e.currentTarget.style.background = 'transparent';
                       e.currentTarget.style.color = theme.textTertiary;
                     }}
@@ -699,77 +355,90 @@ function App() {
                     </svg>
                   </button>
                 </div>
-                <TaskForm onAddTask={addTask} />
+                <TaskForm onAddTask={board.addTask} />
               </div>
-              
+
               {/* Redmine интеграция - временно скрыта из-за проблем с CORS */}
-              {/* <div style={{ background: theme.bgCard, borderRadius: 16, border: `1px solid ${theme.borderPrimary}`, padding: 16, boxShadow: theme.shadow }}>
-                <h3 style={{ fontSize: 14, fontWeight: 600, color: theme.textPrimary, marginBottom: 12 }}>Redmine</h3>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <button
-                    onClick={() => {
-                      if (!redmineSettings) {
-                        setShowRedmineSettings(true);
-                      } else {
-                        setShowRedmineImport(true);
-                      }
-                    }}
+
+              <SearchFilter
+                searchQuery={searchQuery}
+                onSearchChange={setSearchQuery}
+                statusFilter={statusFilter}
+                onStatusFilterChange={setStatusFilter}
+              />
+
+              {newTasks.length > 0 && (
+                <div
+                  style={{
+                    background: theme.bgCard,
+                    borderRadius: 16,
+                    border: `1px solid ${theme.borderPrimary}`,
+                    padding: 16,
+                    boxShadow: theme.shadow,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    minHeight: 0,
+                    width: '100%',
+                    boxSizing: 'border-box',
+                    overflow: 'hidden',
+                  }}
+                >
+                  <h3 style={{ fontSize: 14, fontWeight: 600, color: theme.textPrimary, marginBottom: 12, flexShrink: 0 }}>
+                    Новые задачи ({newTasks.length})
+                  </h3>
+                  <div
                     style={{
-                      padding: '10px 12px',
-                      borderRadius: 8,
-                      border: 'none',
-                      background: theme.accent1,
-                      color: '#fff',
-                      fontSize: 13,
-                      fontWeight: 500,
-                      cursor: 'pointer',
                       display: 'flex',
-                      alignItems: 'center',
+                      flexDirection: 'column',
                       gap: 8,
+                      overflowY: 'auto',
+                      overflowX: 'hidden',
+                      flex: 1,
+                      width: '100%',
+                      boxSizing: 'border-box',
                     }}
                   >
-                    <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                    </svg>
-                    {redmineSettings ? 'Импорт задач' : 'Настроить'}
-                  </button>
-                  {redmineSettings && (
-                    <button
-                      onClick={() => setShowRedmineSettings(true)}
-                      style={{
-                        padding: '8px 12px',
-                        borderRadius: 8,
-                        border: `1px solid ${theme.borderPrimary}`,
-                        background: theme.bgSecondary,
-                        color: theme.textSecondary,
-                        fontSize: 12,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      Настройки Redmine
-                    </button>
-                  )}
-                </div>
-              </div> */}
-              
-              <SearchFilter searchQuery={searchQuery} onSearchChange={setSearchQuery} statusFilter={statusFilter} onStatusFilterChange={setStatusFilter} />
-              {filteredTasks.filter(t => t.status !== 'completed').length > 0 && (
-                <div style={{ background: theme.bgCard, borderRadius: 16, border: `1px solid ${theme.borderPrimary}`, padding: 16, boxShadow: theme.shadow, display: 'flex', flexDirection: 'column', minHeight: 0, width: '100%', boxSizing: 'border-box', overflow: 'hidden' }}>
-                  <h3 style={{ fontSize: 14, fontWeight: 600, color: theme.textPrimary, marginBottom: 12, flexShrink: 0 }}>Новые задачи ({filteredTasks.filter(t => t.status !== 'completed').length})</h3>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto', overflowX: 'hidden', flex: 1, width: '100%', boxSizing: 'border-box' }}>
-                    {filteredTasks.filter(t => t.status !== 'completed').map((task, index) => (
+                    {newTasks.map((task) => (
                       <div key={task.id} className="task-card-wrapper">
-                        <TaskCard task={task} assignedHours={getTaskAssignedHours(task.id)} totalAssignedHours={getTaskAssignedHours(task.id)} onDragStart={setDraggedTaskId} onComplete={completeTask} onEdit={setEditingTask} onDelete={deleteTask} onReorder={(draggedId, targetId) => { const newTasks = [...tasks]; const draggedIndex = newTasks.findIndex(t => t.id === draggedId); const targetIndex = newTasks.findIndex(t => t.id === targetId); if (draggedIndex !== -1 && targetIndex !== -1) { const [draggedTask] = newTasks.splice(draggedIndex, 1); newTasks.splice(targetIndex, 0, draggedTask); setTasks(newTasks); } }} index={index} />
+                        <TaskCard
+                          task={task}
+                          assignedHours={board.getTaskAssignedHours(task.id)}
+                          totalAssignedHours={board.getTaskAssignedHours(task.id)}
+                          onDragStart={setDraggedTaskId}
+                          onComplete={board.completeTask}
+                          onEdit={setEditingTask}
+                          onDelete={board.deleteTask}
+                          onReorder={board.reorderTask}
+                        />
                       </div>
                     ))}
                   </div>
                 </div>
               )}
-              <CompletedTasksList tasks={filteredTasks} assignments={assignments} days={weeks.flatMap(w => w.days)} onReturnToNew={returnToNew} />
-              {filteredTasks.filter(t => t.status !== 'completed').length === 0 && filteredTasks.filter(t => t.status === 'completed').length === 0 && (
-                <div style={{ background: theme.bgSecondary, borderRadius: 16, border: `1px solid ${theme.borderPrimary}`, padding: 24, textAlign: 'center' }}>
+
+              <CompletedTasksList
+                tasks={filteredTasks}
+                assignments={assignments}
+                days={weeks.flatMap((w) => w.days)}
+                onReturnToNew={board.returnToNew}
+              />
+
+              {newTasks.length === 0 && filteredTasks.filter((t) => t.status === 'completed').length === 0 && (
+                <div
+                  style={{
+                    background: theme.bgSecondary,
+                    borderRadius: 16,
+                    border: `1px solid ${theme.borderPrimary}`,
+                    padding: 24,
+                    textAlign: 'center',
+                  }}
+                >
                   <div style={{ fontSize: 32, marginBottom: 8 }}>📋</div>
-                  <p style={{ fontSize: 14, color: theme.textTertiary }}>Создайте первую задачу,<br/>чтобы начать планирование</p>
+                  <p style={{ fontSize: 14, color: theme.textTertiary }}>
+                    Создайте первую задачу,
+                    <br />
+                    чтобы начать планирование
+                  </p>
                 </div>
               )}
             </>
@@ -777,87 +446,66 @@ function App() {
         </aside>
 
         <main style={{ flex: 1, minWidth: 0 }}>
-          {showHint && (
-            <div style={{ marginBottom: 16, background: `${theme.accent1}10`, borderRadius: 16, border: `1px solid ${theme.accent1}30`, padding: 16, position: 'relative' }}>
-              <button onClick={toggleHint} style={{ position: 'absolute', top: 8, right: 8, padding: 4, borderRadius: 6, border: 'none', cursor: 'pointer', background: 'transparent', color: theme.textTertiary }}><svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg></button>
-              <h4 style={{ fontSize: 14, fontWeight: 600, color: theme.accent1, marginBottom: 8 }}>💡 Как пользоваться</h4>
-              <ul style={{ fontSize: 12, color: theme.textSecondary, listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <li>• <b>Создайте задачу</b> слева с оценкой в часах</li>
-                <li>• <b>Перетащите</b> задачу на любой день — появится выбор часов</li>
-                <li>• <b>Перетаскивайте блоки</b> между днями для перераспределения</li>
-                <li>• <b>Разбивайте</b> задачу на части или убирайте из дня</li>
-                <li>• Каждый день = 8 рабочих часов</li>
-              </ul>
-            </div>
-          )}
-          <div ref={weeksContainerRef} style={{ display: 'flex', flexDirection: 'column', gap: 16, maxHeight: 'calc(100vh - 200px)', overflowY: 'auto', paddingRight: 8, scrollMarginTop: 90 }}>
-            {weeks.map((week) => {
-              const isCurrentWeek = week.id === currentWeekId;
-              return (<div key={week.id} id={`week-${week.id}`} style={{ scrollMarginTop: 90 }} ref={isCurrentWeek ? currentWeekRef : null}><WeekRow week={week} tasks={tasks} assignments={assignments} dayStatuses={dayStatuses} onDropTask={dropTask} onRemoveAssignment={removeAssignment} onSplitAssignment={splitAssignment} onMoveAssignment={moveAssignment} onSetDayStatus={setDayStatus} onReorderAssignment={reorderAssignment} onMergeAssignments={mergeAssignments} isMobile={isMobile} isCurrentWeek={isCurrentWeek} visibleMonth={visibleMonth} currentWeekId={currentWeekId} /></div>);
-            })}
+          {showHint && <HintBanner onDismiss={toggleHint} />}
+          <div
+            ref={weeksContainerRef}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 16,
+              maxHeight: 'calc(100vh - 200px)',
+              overflowY: 'auto',
+              paddingRight: 8,
+              scrollMarginTop: 90,
+            }}
+          >
+            {weeks.map((week) => (
+              <div key={week.id} id={`week-${week.id}`} style={{ scrollMarginTop: 90 }}>
+                <WeekRow
+                  week={week}
+                  tasks={tasks}
+                  assignments={assignments}
+                  dayStatuses={dayStatuses}
+                  onDropTask={board.dropTask}
+                  onRemoveAssignment={board.removeAssignment}
+                  onSplitAssignment={board.splitAssignment}
+                  onMoveAssignment={board.moveAssignment}
+                  onSetDayStatus={setDayStatus}
+                  onReorderAssignment={board.reorderAssignment}
+                  onMergeAssignments={board.mergeAssignments}
+                  isMobile={isMobile}
+                  isCurrentWeek={week.id === currentWeekId}
+                  visibleMonth={visibleMonth}
+                  currentWeekId={currentWeekId}
+                />
+              </div>
+            ))}
           </div>
         </main>
       </div>
 
-      {editingTask && <EditTaskModal task={editingTask} onSave={editTask} onCancel={() => setEditingTask(null)} />}
+      {editingTask && <EditTaskModal task={editingTask} onSave={handleSaveTask} onCancel={() => setEditingTask(null)} />}
       {showExportModal && <ExportModal onClose={() => setShowExportModal(false)} onExport={handleExport} />}
-      {/* Redmine модальные окна - временно скрыты из-за проблем с CORS */}
-      {/* {showRedmineSettings && (
-        <RedmineSettingsModal
-          onClose={() => setShowRedmineSettings(false)}
-          onSave={(settings) => setRedmineSettings(settings)}
-        />
-      )}
-      {showRedmineImport && redmineSettings && (
-        <RedmineImportModal
-          settings={redmineSettings}
-          onClose={() => setShowRedmineImport(false)}
-          onImport={handleRedmineImport}
-        />
-      )} */}
 
       <footer style={{ maxWidth: 1800, margin: '32px auto 0', padding: '24px 16px', borderTop: `1px solid ${theme.borderPrimary}` }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12, color: theme.textTertiary }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}><span>📅</span><span>Твой планировщик задач</span></div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}><span>Сделано с ❤️</span><a href="https://github.com/lylelit/monthly-planner2" target="_blank" rel="noopener noreferrer" style={{ color: theme.textTertiary, textDecoration: 'none' }}>GitHub</a></div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span>📅</span>
+            <span>CalmDesk</span>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <span>Сделано с ❤️</span>
+            <a
+              href="https://github.com/lylelit/monthly-planner2"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ color: theme.textTertiary, textDecoration: 'none' }}
+            >
+              GitHub
+            </a>
+          </div>
         </div>
       </footer>
-    </div>
-  );
-}
-
-interface WeekRowProps {
-  week: Week; tasks: Task[]; assignments: TaskAssignment[];
-  dayStatuses: Record<string, { status: 'vacation' | 'holiday' | 'short'; hours?: number }>;
-  onDropTask: (taskId: string, dayId: string, hours: number) => void;
-  onRemoveAssignment: (assignmentId: string) => void;
-  onSplitAssignment: (assignmentId: string, hoursToSplit: number) => void;
-  onMoveAssignment: (assignmentId: string, newDayId: string) => void;
-  onSetDayStatus: (dayId: string, status: 'vacation' | 'holiday' | 'short' | 'working', hours?: number) => void;
-  onReorderAssignment?: (sourceId: string, targetId: string) => void;
-  onMergeAssignments?: (sourceId: string, targetId: string) => void;
-  isMobile: boolean; isCurrentWeek?: boolean;
-  visibleMonth: { month: number; year: number };
-  currentWeekId: string | null;
-}
-
-function WeekRow({ week, tasks, assignments, dayStatuses, onDropTask, onRemoveAssignment, onSplitAssignment, onMoveAssignment, onSetDayStatus, onReorderAssignment, onMergeAssignments, isMobile, isCurrentWeek, visibleMonth, currentWeekId }: WeekRowProps) {
-  const { theme } = useTheme();
-  return (
-    <div style={{ padding: isCurrentWeek ? 8 : 0, background: isCurrentWeek ? `${theme.accent1}08` : 'transparent', borderRadius: 12, border: isCurrentWeek ? `2px solid ${theme.accent1}30` : 'none', transition: 'all 0.3s ease' }}>
-      <div style={{ display: isMobile ? 'flex' : 'grid', gridTemplateColumns: isMobile ? undefined : 'repeat(5, minmax(0, 1fr))', alignItems: 'stretch', flexDirection: isMobile ? 'column' : undefined, gap: isMobile ? 8 : 12 }}>
-        {week.days.map((day) => {
-          const dayDate = new Date(day.date);
-          const isCurrentWeekDay = week.id === currentWeekId;
-          const isDayInActiveMonth = dayDate.getMonth() === visibleMonth.month && dayDate.getFullYear() === visibleMonth.year;
-          const isActiveDay = isCurrentWeekDay || isDayInActiveMonth;
-          return (
-            <div key={day.id} className="day-column-wrapper">
-              <DayColumn day={{ ...day, status: dayStatuses[day.id]?.status || 'working', shortHours: dayStatuses[day.id]?.hours }} tasks={tasks} assignments={assignments} onDropTask={onDropTask} onRemoveAssignment={onRemoveAssignment} onSplitAssignment={onSplitAssignment} onMoveAssignment={onMoveAssignment} onSetDayStatus={onSetDayStatus} onReorderAssignment={onReorderAssignment} onMergeAssignments={onMergeAssignments} isMobile={isMobile} isActiveMonth={isActiveDay} />
-            </div>
-          );
-        })}
-      </div>
     </div>
   );
 }
