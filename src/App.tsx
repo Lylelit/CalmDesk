@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Task } from './types';
-import { getMonthName } from './utils/dateUtils';
+import { Task, Week } from './types';
+import { formatDateKey, getMonthName, getMonthWeeks } from './utils/dateUtils';
 import TaskForm from './components/TaskForm';
 import TaskCard from './components/TaskCard';
 import CompletedTasksList from './components/CompletedTasksList';
@@ -20,7 +20,7 @@ import { loadTasks, loadAssignments, saveTasks, saveAssignments, setCurrentProfi
 // import { getRedmineSettings, RedmineSettings } from './services/redmineService';
 import { useTheme } from './ThemeContext';
 import { useTaskBoard, DayStatusEntry } from './hooks/useTaskBoard';
-import { useFeedScroll, useWeeksFeed, findCurrentWeekId } from './hooks/useFeedScroll';
+import { useFeedScroll, useWeeksFeed, findCurrentWeekId, getWeekDominantMonth } from './hooks/useFeedScroll';
 import { useFilteredTasks, useMonthStats } from './hooks/useMonthStats';
 
 const MOBILE_BREAKPOINT = 768;
@@ -43,7 +43,23 @@ function App() {
   const now = new Date();
   const currentYear = now.getFullYear();
   const currentMonth = now.getMonth();
-  const [visibleMonth, setVisibleMonth] = useState({ month: currentMonth, year: currentYear });
+  // Стартовое значение — доминирующий месяц текущей рабочей недели, а не
+  // просто календарный месяц «сегодня». Это исключает рассинхрон шапки и
+  // карточек в самом первом кадре (например, в воскресенье после выходных).
+  const [visibleMonth, setVisibleMonth] = useState(() => {
+    const allWeeks: Week[] = [];
+    for (let m = 0; m < 12; m++) allWeeks.push(...getMonthWeeks(currentYear, m));
+    const seen = new Set<string>();
+    const feed = allWeeks.filter((w) => {
+      const k = formatDateKey(new Date(w.days[0].date));
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    const id = findCurrentWeekId(feed, now);
+    const week = id ? feed.find((w) => w.id === id) : undefined;
+    return week ? getWeekDominantMonth(week) : { month: currentMonth, year: currentYear };
+  });
 
   // ── Доска задач ──────────────────────────────────────────────────────
   const board = useTaskBoard();
@@ -73,6 +89,15 @@ function App() {
   const weeks = useWeeksFeed(currentYear);
 
   const currentWeekId = useMemo(() => findCurrentWeekId(weeks), [weeks]);
+
+  // Месяц в шапке всегда производен от реально видимой недели ленты:
+  // если известна текущая неделя — её доминирующий месяц, иначе — начальный.
+  // Это исключает рассинхрон «в шапке октябрь, в карточках январь».
+  useEffect(() => {
+    if (!currentWeekId) return;
+    const week = weeks.find((w) => w.id === currentWeekId);
+    if (week) setVisibleMonth(getWeekDominantMonth(week));
+  }, [currentWeekId, weeks]);
 
   const { scrollToMonth } = useFeedScroll(weeksContainerRef, weeks, currentWeekId, visibleMonth, setVisibleMonth);
 
