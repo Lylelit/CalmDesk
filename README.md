@@ -58,8 +58,8 @@ npm run build
 3. **Project Settings → API**: скопируйте `Project URL` и `anon public` key.
 4. В корне проекта создайте файл `.env.local` (по образцу `.env.example`):
    ```
-   VITE_SUPABASE_URL=https://xxxx.supabase.co
-   VITE_SUPABASE_ANON_KEY=eyJ...
+   NEXT_PUBLIC_SUPABASE_URL=https://xxxx.supabase.co
+   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=eyJ...
    ```
 5. Перезапустите `npm run dev`. Экран входа станет email+парольным; при первом
    входе старые локальные данные пользователя перенесутся в облако автоматически.
@@ -71,3 +71,23 @@ npm run build
 - Руководитель видит панель «Команда»: добавляет сотрудника по email,
   смотрит его доску, создаёт ему задачи и скачивает Excel-статистику.
 - Доступ к данным разграничен политиками RLS: сотрудник не видит чужие доски.
+
+## Публикация для других пользователей (GitHub Pages)
+
+В репозитории уже лежит workflow `.github/workflows/deploy.yml`: при каждом пуше
+в ветку `main` сайт собирается и публикуется на GitHub Pages по адресу
+`https://<ваш-логин>.github.io/<имя-репозитория>/monthly-planner2/...`
+(точный адрес публикуется в логе деплоя и в Settings → Pages).
+
+**Обязательно перед первым деплоем:** так как `.env.local` не попадает в git,
+нужно передать ключи Supabase сборщику на GitHub:
+1. Репозиторий → **Settings → Secrets and variables → Actions → Variables → New repository variable**:
+   - Работают оба набора имён: `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY`
+     и `NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
+     (первые — рекомендуемые для Vite).
+2. Также в **Settings → Pages** источник (Build and deployment) должен быть **GitHub Actions**.
+3. Сделайте push в `main` и дождите зелёного галочку у коммита — адрес появится во вкладке Actions → Deploy.
+
+Если переменные не задать, публичная версия не упадёт в белый экран (защита в
+`supabaseClient.ts`), но будет работать на localStorage каждого браузера,
+то есть общий облачный доступ между пользователями не сработает.

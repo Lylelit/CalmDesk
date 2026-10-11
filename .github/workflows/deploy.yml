@@ -29,8 +29,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Ключи Supabase берутся из настроек репозитория
+      # (Settings → Secrets and variables → Actions → Variables):
+      #   VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY.
+      # Без них публичная сборка упадёт на «Invalid supabaseUrl» (белый экран).
       - name: Build
         run: npm run build
+        env:
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
 
       - name: Fix asset paths
         run: node fix-paths.js
