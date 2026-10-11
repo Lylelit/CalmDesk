@@ -52,10 +52,13 @@ export function formatDateKey(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
-// ISO-идентификатор недели для понедельника данной недели, напр. "2026-W41"
-function getIsoWeekId(monday: Date): string {
-  const thu = new Date(monday);
-  thu.setDate(monday.getDate() + 3); // четверг определяет ISO-год/неделю
+// ISO-идентификатор недели по ЛЮБОМУ дню недели (обычно передаётся понедельник),
+// напр. "2026-W41". Алгоритм через четверг корректно работает и для дней
+// сб/вс — это используется при поиске текущей недели в выходные дни.
+export function getIsoWeekId(date: Date): string {
+  const thu = new Date(date);
+  const dowFromMonday = date.getDay() === 0 ? 6 : date.getDay() - 1;
+  thu.setDate(date.getDate() + (3 - dowFromMonday)); // четверг определяет ISO-год/неделю
   const jan4 = new Date(thu.getFullYear(), 0, 4);
   const mondayOfJan4Week = new Date(jan4);
   const janDow = jan4.getDay();

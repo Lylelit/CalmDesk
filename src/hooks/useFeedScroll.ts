@@ -1,6 +1,27 @@
 import { RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Week } from '../types';
-import { formatDateKey, getMonthWeeks } from '../utils/dateUtils';
+import { formatDateKey, getIsoWeekId, getMonthWeeks } from '../utils/dateUtils';
+
+/**
+ * Идентификатор «текущей» недели для ленты Пн–Пт.
+ * В будни — неделя, содержащая сегодняшний день. В выходные (сб/вс), которых
+ * в ленте нет, — ближайшая рабочая неделя: суббота относится к уходящей
+ * рабочей неделе (пятница была вчера), а воскресенье — к наступающей
+ * (понедельник завтра). Возвращает id из weeks или null.
+ */
+export function findCurrentWeekId(weeks: Week[], today: Date = new Date()): string | null {
+  const todayKey = formatDateKey(today);
+  const byDay = weeks.find((w) => w.days.some((day) => formatDateKey(new Date(day.date)) === todayKey));
+  if (byDay) return byDay.id;
+
+  const dow = today.getDay(); // 0 = Вс, 6 = Сб
+  const anchor = new Date(today);
+  if (dow === 6) anchor.setDate(today.getDate() - 1); // сб → пятница этой же недели
+  if (dow === 0) anchor.setDate(today.getDate() + 1); // вс → понедельник следующей недели
+  const isoId = getIsoWeekId(anchor);
+  const byIso = weeks.find((w) => w.id === isoId);
+  return byIso?.id || null;
+}
 
 /** Месяц, которому принадлежит неделя (большинство из 5 рабочих дней недели). */
 export function getWeekDominantMonth(week: Week): { month: number; year: number } {
@@ -108,7 +129,6 @@ export function useFeedScroll(
     let userScrolled = false;
     let finished = false;
     const startTs = performance.now();
-
     const finish = () => {
       if (finished || cancelled) return;
       finished = true;
@@ -119,11 +139,27 @@ export function useFeedScroll(
 
     const doScroll = (): boolean => {
       const container = containerRef.current;
+      if (!container) return false;
       const weekElement = currentWeekId ? document.getElementById(`week-${currentWeekId}`) : null;
-      if (!container || !weekElement || weekElement.offsetHeight <= 0) return false;
+      if (!weekElement || weekElement.offsetHeight <= 0) return false;
       scrollToWeek(container, weekElement);
       return true;
     };
+
+    // Диагностическое предупреждение: если через 3 секунды после монтирования
+    // элемент текущей недели так и не найден в DOM — автоскролл невозможен.
+    // (Причины: пустой currentWeekId, дубли id в ленте, ошибка генерации недель.)
+    const warnTimer = window.setTimeout(() => {
+      if (cancelled || finished) return;
+      if (!currentWeekId) {
+        console.warn('[CalmDesk] Автоскролл пропущен: currentWeekId = null (текущая неделя не найдена в ленте).');
+      } else if (!document.getElementById(`week-${currentWeekId}`)) {
+        console.warn(
+          `[CalmDesk] Автоскролл пропущен: элемент #week-${currentWeekId} отсутствует в DOM ` +
+            `(проверьте id недель и генерацию ленты).`,
+        );
+      }
+    }, 3000);
 
     const attach = () => {
       if (cancelled) return;
@@ -134,7 +170,12 @@ export function useFeedScroll(
       }
 
       // Первый скролл — сразу, как только контейнер в DOM.
-      doScroll();
+      const scrolled = doScroll();
+      if (!scrolled && performance.now() - startTs > 1500) {
+        // Долго не дождались элемента недели — завершаем попытку (сработает warn выше).
+        finish();
+        return;
+      }
 
       // Повторяем скролл при каждом изменении размеров ленты (загрузка данных,
       // ре-рендеры карточек) — это и чинит «откат» к январю.
@@ -168,6 +209,7 @@ export function useFeedScroll(
 
     return () => {
       cancelled = true;
+      window.clearTimeout(warnTimer);
       ro?.disconnect();
     };
   }, [shouldScrollToCurrentWeek, currentWeekId, containerRef, scrollToWeek, setVisibleMonth]);

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Task } from './types';
-import { formatDateKey, getMonthName } from './utils/dateUtils';
+import { getMonthName } from './utils/dateUtils';
 import TaskForm from './components/TaskForm';
 import TaskCard from './components/TaskCard';
 import CompletedTasksList from './components/CompletedTasksList';
@@ -20,7 +20,7 @@ import { loadTasks, loadAssignments, saveTasks, saveAssignments, setCurrentProfi
 // import { getRedmineSettings, RedmineSettings } from './services/redmineService';
 import { useTheme } from './ThemeContext';
 import { useTaskBoard, DayStatusEntry } from './hooks/useTaskBoard';
-import { useFeedScroll, useWeeksFeed } from './hooks/useFeedScroll';
+import { useFeedScroll, useWeeksFeed, findCurrentWeekId } from './hooks/useFeedScroll';
 import { useFilteredTasks, useMonthStats } from './hooks/useMonthStats';
 
 const MOBILE_BREAKPOINT = 768;
@@ -72,13 +72,7 @@ function App() {
   // ── Лента недель и прокрутка ─────────────────────────────────────────
   const weeks = useWeeksFeed(currentYear);
 
-  const currentWeekId = useMemo(() => {
-    // Сравниваем по календарной дате (год/месяц/число), а не через toDateString,
-    // чтобы поиск текущей недели не зависел от времени суток и таймзоны.
-    const todayKey = formatDateKey(new Date());
-    const week = weeks.find((w) => w.days.some((day) => formatDateKey(new Date(day.date)) === todayKey));
-    return week?.id || null;
-  }, [weeks]);
+  const currentWeekId = useMemo(() => findCurrentWeekId(weeks), [weeks]);
 
   const { scrollToMonth } = useFeedScroll(weeksContainerRef, weeks, currentWeekId, visibleMonth, setVisibleMonth);
 
