@@ -491,7 +491,7 @@ function App() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12, color: theme.textTertiary }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span>📅</span>
-            <span>Твой планировщик задач</span>
+            <span>CalmDesk</span>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
             <span>Сделано с ❤️</span>

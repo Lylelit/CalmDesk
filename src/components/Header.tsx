@@ -85,14 +85,20 @@ export default function Header({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
+                flexShrink: 0,
               }}
             >
               <CalendarIcon size={iconSize} />
             </div>
             {!isMobile && (
-              <h1 style={{ fontSize: 18, fontWeight: 700, color: theme.textPrimary, margin: 0 }}>
-                Твой планировщик
-              </h1>
+              <div>
+                <h1 style={{ fontSize: 18, fontWeight: 700, color: theme.textPrimary, margin: 0, lineHeight: 1.2 }}>
+                  CalmDesk
+                </h1>
+                <div style={{ fontSize: 12, color: theme.textTertiary, marginTop: 2 }}>
+                  Будь в балансе. Переработки - фу
+                </div>
+              </div>
             )}
           </div>
         </div>

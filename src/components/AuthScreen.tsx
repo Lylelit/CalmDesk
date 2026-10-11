@@ -74,7 +74,7 @@ export default function AuthScreen({ onLogin }: AuthScreenProps) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
             </svg>
           </div>
-          <h1 style={{ fontSize: '24px', fontWeight: 700, color: theme.textPrimary, margin: '0 0 8px' }}>Твой планировщик</h1>
+          <h1 style={{ fontSize: '24px', fontWeight: 700, color: theme.textPrimary, margin: '0 0 8px' }}>CalmDesk</h1>
           <p style={{ fontSize: '14px', color: theme.textSecondary, margin: 0 }}>
             {mode === 'select' && profiles.length > 0 ? 'Выберите профиль' : mode === 'login' ? 'Вход в систему' : 'Создание профиля'}
           </p>
