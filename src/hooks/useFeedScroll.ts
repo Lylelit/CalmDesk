@@ -1,13 +1,17 @@
 import { RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Week } from '../types';
-import { formatDateKey, getIsoWeekId, getMonthWeeks } from '../utils/dateUtils';
+import { formatDateKey, getMonthWeeks } from '../utils/dateUtils';
 
 /**
  * Идентификатор «текущей» недели для ленты Пн–Пт.
  * В будни — неделя, содержащая сегодняшний день. В выходные (сб/вс), которых
- * в ленте нет, — ближайшая рабочая неделя: суббота относится к уходящей
- * рабочей неделе (пятница была вчера), а воскресенье — к наступающей
- * (понедельник завтра). Возвращает id из weeks или null.
+ * в ленте нет, — ближайшая наступающая рабочая неделя: и суббота, и
+ * воскресенье относятся к ещё не начавшейся неделе (впереди понедельник).
+ * Неделя ищется по дате её понедельника (первого дня), а не по ISO-id:
+ * ISO-id, вычисленный от выходного дня (его четверг относится к следующей
+ * неделе), не совпадает с id лент (вычисляемыми от понедельника) и давал
+ * смещение подсветки на +1 неделю.
+ * Возвращает id из weeks или null.
  */
 export function findCurrentWeekId(weeks: Week[], today: Date = new Date()): string | null {
   const todayKey = formatDateKey(today);
@@ -16,11 +20,15 @@ export function findCurrentWeekId(weeks: Week[], today: Date = new Date()): stri
 
   const dow = today.getDay(); // 0 = Вс, 6 = Сб
   const anchor = new Date(today);
-  if (dow === 6) anchor.setDate(today.getDate() - 1); // сб → пятница этой же недели
-  if (dow === 0) anchor.setDate(today.getDate() + 1); // вс → понедельник следующей недели
-  const isoId = getIsoWeekId(anchor);
-  const byIso = weeks.find((w) => w.id === isoId);
-  return byIso?.id || null;
+  // сб → +2 дня, вс → +1 день: в обоих случаях попадаем на понедельник
+  // ближайшей наступающей рабочей недели.
+  if (dow === 6) anchor.setDate(today.getDate() + 2);
+  else if (dow === 0) anchor.setDate(today.getDate() + 1);
+  else return null; // на всякий случай: другие дни уже покрыты поиском byDay
+
+  const mondayKey = formatDateKey(anchor);
+  const byMonday = weeks.find((w) => formatDateKey(new Date(w.days[0].date)) === mondayKey);
+  return byMonday?.id || null;
 }
 
 /**
