@@ -22,9 +22,16 @@ describe('formatDateKey', () => {
 });
 
 describe('getMonthWeeks', () => {
-  it('возвращает только рабочие дни (Пн-Пт)', () => {
+  it('возвращает только рабочие дни (Пн-Пт), флаг isWorkingDay = день в целевом месяце', () => {
     const weeks = getMonthWeeks(2026, 9); // октябрь 2026
-    for (const w of weeks) for (const d of w.days) expect(d.isWorkingDay).toBe(true);
+    for (const w of weeks) {
+      for (const d of w.days) {
+        expect(d.dayOfWeek).toBeGreaterThanOrEqual(1);
+        expect(d.dayOfWeek).toBeLessThanOrEqual(5);
+        const inOctober = new Date(d.date).getMonth() === 9 && new Date(d.date).getFullYear() === 2026;
+        expect(d.isWorkingDay).toBe(inOctober);
+      }
+    }
   });
 });
 
@@ -48,11 +55,16 @@ describe('лента недель', () => {
     }
   });
 
-  it('getWeekDominantMonth определяет месяц по большинству дней', () => {
+  it('getWeekDominantMonth определяет месяц по большинству карточек Пн–Пт', () => {
+    // Первая «неделя октября» = 28.09–02.10: 3 карточки сентября против 2 октября,
+    // поэтому доминирует сентябрь — правило большинства видимых карточек.
     const week = getMonthWeeks(2026, 9)[0];
     const dm = getWeekDominantMonth(week);
-    expect(dm.month).toBe(9);
+    expect(dm.month).toBe(8);
     expect(dm.year).toBe(2026);
+    // Полностью октябрьская неделя (W41, 05–09.10) даёт октябрь.
+    const w41 = getMonthWeeks(2026, 9).find((w) => w.id === '2026-W41')!;
+    expect(getWeekDominantMonth(w41)).toEqual({ month: 9, year: 2026 });
   });
 });
 

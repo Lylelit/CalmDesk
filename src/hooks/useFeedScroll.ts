@@ -23,7 +23,13 @@ export function findCurrentWeekId(weeks: Week[], today: Date = new Date()): stri
   return byIso?.id || null;
 }
 
-/** Месяц, которому принадлежит неделя (большинство из 5 рабочих дней недели). */
+/**
+ * Месяц, которому «принадлежит» неделя — по правилу большинства карточек
+ * в видимой области пользователя. Карточки в ленте показаны только для
+ * рабочих дней Пн–Пт, поэтому доминирует месяц с наибольшим числом таких
+ * карточек (например, 28.09–02.10 → сентябрь: 3 против 2). При равенстве
+ * выбирается более ранний месяц.
+ */
 export function getWeekDominantMonth(week: Week): { month: number; year: number } {
   const monthCounts: Record<string, number> = {};
   week.days.forEach((day) => {
@@ -41,6 +47,32 @@ export function getWeekDominantMonth(week: Week): { month: number; year: number 
   });
   const [yearStr, monthStr] = maxMonth.split('-');
   return { month: parseInt(monthStr), year: parseInt(yearStr) };
+}
+
+/**
+ * Смещение, на которое верхняя грань текущей недели должна уйти ЗА ВЕРХ
+ * контейнера ленты: sticky-шапка календаря (~90px) + один ряд карточек
+ * (~140px) + межстрочный отступ (16px). При таком скролле текущая неделя
+ * визуально занимает позицию «второй ряд сверху».
+ */
+export const CURRENT_WEEK_ROW_OFFSET = 90 + 140 + 16;
+
+/**
+ * Ищет DOM-элементы недель ленты снизу вверх и возвращает id последней
+ * (нижней) недели, чья верхняя грань находится выше probeY — то есть
+ * недели, которая визуально занимает позицию «второй ряд сверху».
+ */
+export function findWeekIdAtSecondRowFromTop(container: HTMLElement, weeks: Week[], probeY: number): string | null {
+  let found: string | null = null;
+  for (let i = weeks.length - 1; i >= 0; i--) {
+    const el = document.getElementById(`week-${weeks[i].id}`);
+    if (!el) continue;
+    if (el.getBoundingClientRect().top <= probeY) {
+      found = weeks[i].id;
+      break;
+    }
+  }
+  return found;
 }
 
 /**
@@ -120,6 +152,20 @@ export function useFeedScroll(
     container.scrollTop = targetTop;
   }, []);
 
+  // Прокрутка к ТЕКУЩЕЙ неделе с фиксацией на позиции «второй ряд сверху»:
+  // верхняя грань недели ставится на CURRENT_WEEK_ROW_OFFSET пикселей выше
+  // верха контейнера, поэтому первый видимый ряд занимают карточки предыдущей
+  // недели, а текущая неделя — вторым рядом.
+  const scrollToCurrentWeek = useCallback(
+    (container: HTMLElement, weekElement: HTMLElement) => {
+      const contRect = container.getBoundingClientRect();
+      const elRect = weekElement.getBoundingClientRect();
+      const targetTop = Math.max(0, container.scrollTop + (elRect.top - contRect.top) - 90 + CURRENT_WEEK_ROW_OFFSET);
+      container.scrollTop = targetTop;
+    },
+    [],
+  );
+
   // Одна попытка автоскролла за сессию к текущей неделе.
   useEffect(() => {
     if (!shouldScrollToCurrentWeek) return;
@@ -142,7 +188,7 @@ export function useFeedScroll(
       if (!container) return false;
       const weekElement = currentWeekId ? document.getElementById(`week-${currentWeekId}`) : null;
       if (!weekElement || weekElement.offsetHeight <= 0) return false;
-      scrollToWeek(container, weekElement);
+      scrollToCurrentWeek(container, weekElement);
       return true;
     };
 
@@ -212,7 +258,7 @@ export function useFeedScroll(
       window.clearTimeout(warnTimer);
       ro?.disconnect();
     };
-  }, [shouldScrollToCurrentWeek, currentWeekId, containerRef, scrollToWeek, setVisibleMonth]);
+  }, [shouldScrollToCurrentWeek, currentWeekId, containerRef, scrollToCurrentWeek, setVisibleMonth]);
 
   // Обновление заголовка месяца при ручной прокрутке.
   useEffect(() => {
@@ -227,17 +273,13 @@ export function useFeedScroll(
         // не трогаем — иначе он «прыгнет» на январь до скролла к текущей неделе.
         if (autoScrollPendingRef.current) return;
         const containerRect = container.getBoundingClientRect();
-        const probeY = containerRect.top + Math.min(100, containerRect.height / 2);
-        let activeWeek: Week | undefined;
-        for (const week of weeksRef.current) {
-          const weekElement = document.getElementById(`week-${week.id}`);
-          if (!weekElement) continue;
-          const rect = weekElement.getBoundingClientRect();
-          if (rect.top <= probeY && rect.bottom > probeY) {
-            activeWeek = week;
-            break;
-          }
-        }
+        // Точка измерения — граница первого и второго видимых рядов (~90px +
+        // половина высоты ряда карточек). Неделя, занимающая позицию
+        // «второй ряд сверху», и считается активной для заголовка месяца.
+        const probeY = containerRect.top + 90 + 70;
+        const activeWeekId = findWeekIdAtSecondRowFromTop(container, weeksRef.current, probeY);
+        if (!activeWeekId) return;
+        const activeWeek = weeksRef.current.find((w) => w.id === activeWeekId);
         if (activeWeek) {
           const visible = getWeekDominantMonth(activeWeek);
           const currentVisibleMonth = visibleMonthRef.current;
