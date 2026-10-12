@@ -39,8 +39,16 @@ async function fetchMyProfile(userId: string, email: string): Promise<Profile> {
   let displayName = email.split('@')[0];
   let role: 'manager' | 'employee' = 'employee';
   if (supabase) {
-    const { data } = await supabase.from('profiles').select('display_name, role').eq('id', userId).maybeSingle();
-    if (data) {
+    // Гарантируем наличие строки в profiles (на случай, если триггер
+    // handle_new_user не применили/не сработал — см. supabase/schema.sql).
+    await supabase.rpc('ensure_my_profile');
+    const { data, error } = await supabase.from('profiles').select('display_name, role').eq('id', userId).maybeSingle();
+    if (error) {
+      console.error(
+        '[auth] Не удалось прочитать profiles. Скорее всего не применена supabase/schema.sql ' +
+          '(таблицы/RLS-политики). Ошибка:', error.message,
+      );
+    } else if (data) {
       displayName = data.display_name || displayName;
       role = data.role;
     }
