@@ -40,12 +40,35 @@ export function getStorageMode(): 'supabase' | 'local' {
 
 // ── Конвертеры форм: БД-строка ↔ тип приложения ─────────────────────────────
 interface TaskRow {
-  id: string; title: string; total_hours: number; color: string;
+  id: string; owner_id?: string; title: string; total_hours: number; color: string;
   description: string | null; link: string | null;
   status: 'new' | 'completed' | null; created_at: string | null; completed_at: string | null;
 }
 interface AssignmentRow {
-  id: string; task_id: string; day_id: string; hours: number; order: number;
+  id: string; owner_id?: string; task_id: string; day_id: string; hours: number; order: number;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * В Supabase id/task_id/owner_id — это uuid. Локальные данные могут содержать
+ * произвольные строковые id из старого localStorage. Для вставки в облако нужно
+ * гарантировать валидный UUID. Если id не является UUID, генерируем новый и
+ * сохраняем маппинг старый→новый, чтобы заодно поправить task_id у assignments.
+ */
+function ensureUuid(value: string, map: Map<string, string>): string {
+  if (UUID_RE.test(value)) return value;
+  const existing = map.get(value);
+  if (existing) return existing;
+  const fresh = crypto.randomUUID();
+  map.set(value, fresh);
+  return fresh;
+}
+
+function remapOrGenerate(value: string, map: Map<string, string>): string {
+  const mapped = map.get(value);
+  if (mapped) return mapped;
+  return ensureUuid(value, map);
 }
 
 const toTask = (r: TaskRow): Task => ({
@@ -125,8 +148,10 @@ export async function saveTasks(tasks: Task[], ownerId?: string): Promise<void> 
   }
 
   if (tasks.length > 0) {
+    // Локальные id могут быть не UUID — для Supabase приводим к uuid и запоминаем маппинг.
+    const idMap = new Map<string, string>();
     const rows = tasks.map((t) => ({
-      id: t.id,
+      id: ensureUuid(t.id, idMap),
       owner_id: owner,
       title: t.title,
       total_hours: t.totalHours,
@@ -165,10 +190,12 @@ export async function saveAssignments(assignments: TaskAssignment[], ownerId?: s
   }
 
   if (assignments.length > 0) {
+    // Локальные id/task_id могут быть не UUID — для Supabase приводим к uuid.
+    const idMap = new Map<string, string>();
     const rows = assignments.map((a) => ({
-      id: a.id,
+      id: ensureUuid(a.id, idMap),
       owner_id: owner,
-      task_id: a.taskId,
+      task_id: remapOrGenerate(a.taskId, idMap),
       day_id: a.dayId,
       hours: a.hours,
       order: a.order,
@@ -194,16 +221,18 @@ export async function migrateLocalToSupabase(userId: string): Promise<{ migrated
     .eq('owner_id', userId);
   if ((count ?? 0) > 0) return { migrated: false, tasks: 0, assignments: 0 };
 
+  // Локальные id могут быть не UUID — при переносе в Supabase приводим их к uuid.
+  const idMap = new Map<string, string>();
   if (local.tasks.length > 0) {
     await sb.from('tasks').insert(local.tasks.map((t) => ({
-      id: t.id, owner_id: userId, title: t.title, total_hours: t.totalHours, color: t.color,
+      id: ensureUuid(t.id, idMap), owner_id: userId, title: t.title, total_hours: t.totalHours, color: t.color,
       description: t.description ?? null, link: t.link ?? null, status: t.status ?? 'new',
       created_at: t.createdAt ?? null, completed_at: t.completedAt ?? null,
     })));
   }
   if (local.assignments.length > 0) {
     await sb.from('assignments').insert(local.assignments.map((a) => ({
-      id: a.id, owner_id: userId, task_id: a.taskId, day_id: a.dayId, hours: a.hours, order: a.order,
+      id: ensureUuid(a.id, idMap), owner_id: userId, task_id: remapOrGenerate(a.taskId, idMap), day_id: a.dayId, hours: a.hours, order: a.order,
     })));
   }
   return { migrated: true, tasks: local.tasks.length, assignments: local.assignments.length };

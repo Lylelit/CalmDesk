@@ -114,7 +114,50 @@ create table if not exists public.day_statuses (
   primary key (owner_id, day_id)
 );
 
--- ── 4. Row Level Security ────────────────────────────────────────────────────
+-- ── 3.1 Самовосстановление схемы ─────────────────────────────────────────────
+-- Если таблицы уже были созданы ранее без колонки owner_id (или приложение
+-- вставляет UUID-строки формата crypto.randomUUID() в таблицу с id типа text),
+-- PostgREST вернёт 400 Bad Request при POST /tasks. Приводим схему к ожидаемому
+-- виду безопасно и идемпотентно.
+do $$
+begin
+  if to_regclass('public.tasks') is not null then
+    if not exists (select 1 from information_schema.columns where table_schema='public' and table_name='tasks' and column_name='owner_id') then
+      alter table public.tasks add column owner_id uuid;
+    end if;
+    if exists (select 1 from information_schema.columns where table_schema='public' and table_name='tasks' and column_name='id' and data_type <> 'uuid') then
+      alter table public.tasks alter column id type uuid using (case when id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' then id::uuid else gen_random_uuid() end);
+    end if;
+  end if;
+
+  if to_regclass('public.assignments') is not null then
+    if not exists (select 1 from information_schema.columns where table_schema='public' and table_name='assignments' and column_name='owner_id') then
+      alter table public.assignments add column owner_id uuid;
+    end if;
+    if exists (select 1 from information_schema.columns where table_schema='public' and table_name='assignments' and column_name='id' and data_type <> 'uuid') then
+      alter table public.assignments alter column id type uuid using (case when id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' then id::uuid else gen_random_uuid() end);
+    end if;
+    if exists (select 1 from information_schema.columns where table_schema='public' and table_name='assignments' and column_name='task_id' and data_type <> 'uuid') then
+      alter table public.assignments alter column task_id type uuid using (case when task_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' then task_id::uuid else gen_random_uuid() end);
+    end if;
+  end if;
+
+  if to_regclass('public.day_statuses') is not null then
+    if not exists (select 1 from information_schema.columns where table_schema='public' and table_name='day_statuses' and column_name='owner_id') then
+      alter table public.day_statuses add column owner_id uuid;
+    end if;
+  end if;
+end$$;
+
+-- ── 4. Привилегии (GRANT) + Row Level Security ──────────────────────────────
+-- ВАЖНО: в новых проектах Supabase (после ~мая 2025) по умолчанию нет прямого
+-- GRANT на public-таблицы для ролей anon/authenticated — без этих строк
+-- запросы из приложения вернут 403 "permission denied for table ..." даже
+-- при корректных RLS-политиках. Повторное выполнение безопасно.
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on all tables in schema public to anon, authenticated;
+alter default privileges in schema public grant select, insert, update, delete on tables to anon, authenticated;
+
 alter table public.profiles         enable row level security;
 alter table public.team_memberships enable row level security;
 alter table public.tasks            enable row level security;
