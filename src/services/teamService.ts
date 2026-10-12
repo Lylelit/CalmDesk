@@ -39,22 +39,46 @@ export async function addTeamMemberByEmail(email: string): Promise<TeamMember | 
   const session = (await supabase!.auth.getSession()).data.session;
   if (!session) throw new Error('Нужно войти в систему');
 
+  const cleanEmail = email.trim().toLowerCase();
   const { data: emp, error } = await supabase!
     .from('profiles')
     .select('id, display_name, email')
-    .eq('email', email.trim().toLowerCase())
+    .eq('email', cleanEmail)
     .maybeSingle();
   if (error) throw error;
-  if (!emp) throw new Error('Пользователь с таким email не найден (пусть сначала зарегистрируется)');
+  if (!emp) {
+    // Fallback: в profiles мог остаться устаревший email (пользователь
+    // подтвердил/изменил его в Auth). Ищем по auth.users через RPC и
+    // синхронизируем profiles, затем повторяем поиск.
+    const { error: syncErr } = await supabase!.rpc('sync_all_profiles');
+    if (syncErr) console.warn('[team] sync_all_profiles:', syncErr.message);
+    const { data: emp2, error: err2 } = await supabase!
+      .from('profiles')
+      .select('id, display_name, email')
+      .eq('email', cleanEmail)
+      .maybeSingle();
+    if (err2) throw err2;
+    if (!emp2) {
+      throw new Error(
+        'Пользователь с таким email не найден среди профилей приложения. ' +
+          'Проверьте опечатку или попросите сотрудника войти на сайт хотя бы один раз — профиль создаётся при первом входе.'
+      );
+    }
+    return retryInsertMembership(emp2 as TeamMember, session.user.id);
+  }
+  return retryInsertMembership(emp as TeamMember, session.user.id);
+}
 
+/** Вставка членства в команду; «уже добавлен» считаем успехом. */
+async function retryInsertMembership(emp: TeamMember, managerId: string): Promise<TeamMember | null> {
   const { error: insErr } = await supabase!
     .from('team_memberships')
-    .insert({ manager_id: session.user.id, employee_id: emp.id });
+    .insert({ manager_id: managerId, employee_id: emp.id });
   if (insErr) {
     if (insErr.code === '23505') throw new Error('Этот сотрудник уже в вашей команде');
     throw insErr;
   }
-  return emp as TeamMember;
+  return emp;
 }
 
 /** Убрать сотрудника из команды. */

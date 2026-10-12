@@ -66,11 +66,92 @@ begin
              split_part(coalesce((select email from auth.users where id = auth.uid()), ''), '@', 1)),
     case when (select count(*) from public.profiles) = 0 then 'manager' else 'employee' end
   )
-  on conflict (id) do nothing;
+  on conflict (id) do update
+    -- если строка уже есть, но email в ней устарел (например, пользователь
+    -- подтвердил/изменил email в Auth после создания профиля) — обновляем.
+    set email = excluded.email
+    where public.profiles.email is distinct from excluded.email;
 end;
 $$;
 revoke all on function public.ensure_my_profile() from anon;
 grant execute on function public.ensure_my_profile() to authenticated;
+
+-- ── 1.1 Синхронизация email между auth.users и profiles ────────────────────
+-- Если пользователь меняет email через Supabase Auth, строка в profiles
+-- должна обновиться автоматически — иначе руководитель не найдёт сотрудника
+-- по актуальному email («Пользователь с таким email не найден»).
+create or replace function public.sync_profile_email()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  update public.profiles set email = new.email where id = new.id;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_updated on auth.users;
+create trigger on_auth_user_updated
+  after update of email on auth.users
+  for each row execute function public.sync_profile_email();
+
+-- Разовая синхронизация: чинит уже существующие расхождения email.
+update public.profiles p
+   set email = u.email
+  from auth.users u
+ where p.id = u.id
+   and p.email is distinct from u.email;
+
+-- RPC для клиента: создать/обновить профили по всем пользователям auth.users.
+-- Вызывается из TeamPanel, если руководитель не нашёл сотрудника по email.
+-- ВАЖНО: если триггер handle_new_user() ещё не был применён (старая база),
+-- сначала применяем его — иначе sync_all_profiles создаст профили без ролей.
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  insert into public.profiles (id, email, display_name, role)
+  values (
+    new.id,
+    new.email,
+    coalesce(new.raw_user_meta_data ->> 'display_name', split_part(new.email, '@', 1)),
+    -- первый зарегистрированный пользователь становится руководителем;
+    -- дальше роли назначаются вручную (см. п.5) или руководителем из UI.
+    case when (select count(*) from public.profiles) = 0 then 'manager' else 'employee' end
+  )
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+create or replace function public.sync_all_profiles()
+returns void
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  insert into public.profiles (id, email, display_name, role)
+  select
+    u.id,
+    u.email,
+    coalesce(u.raw_user_meta_data ->> 'display_name', split_part(coalesce(u.email, ''), '@', 1)),
+    case when (select count(*) from public.profiles) = 0 then 'manager' else 'employee' end
+  from auth.users u
+  on conflict (id) do update
+    set email = excluded.email
+    where public.profiles.email is distinct from excluded.email;
+end;
+$$;
+revoke all on function public.sync_all_profiles() from anon;
+grant execute on function public.sync_all_profiles() to authenticated;
 
 -- ── 2. Команды: руководитель привязывает к себе сотрудников ────────────────
 create table if not exists public.team_memberships (
