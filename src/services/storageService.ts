@@ -209,6 +209,94 @@ export async function migrateLocalToSupabase(userId: string): Promise<{ migrated
   return { migrated: true, tasks: local.tasks.length, assignments: local.assignments.length };
 }
 
+// ── Статусы дней (отпуск / выходной / короткий день) ────────────────────────
+// Ключ дня — текст ('YYYY-MM-DD'), значение — статус и опциональные часы
+// для короткого дня. Хранятся в таблице day_statuses под тем же owner_id,
+// что и задачи, поэтому RLS-политики для них идентичны задачам.
+export interface DayStatusRecord {
+  status: 'vacation' | 'holiday' | 'short';
+  hours?: number;
+}
+export type DayStatusMap = Record<string, DayStatusRecord>;
+
+interface DayStatusRow {
+  day_id: string;
+  status: 'vacation' | 'holiday' | 'short';
+  short_hours: number | null;
+}
+
+/**
+ * Загрузка статусов дней владельца доски.
+ * Ошибку пробрасываем наружу — вызывающий код покажет её в консоли,
+ * но ронять загрузку доски из-за этого не нужно (см. App.loadData).
+ */
+export async function loadDayStatuses(viewer?: { userId?: string }): Promise<DayStatusMap> {
+  if (getStorageMode() === 'supabase' && supabase) {
+    const owner = viewer?.userId ?? currentUserId ?? currentProfile?.id;
+    if (!owner) return {};
+    const { data, error } = await supabase.from('day_statuses').select('*').eq('owner_id', owner);
+    if (error) throw error;
+    const map: DayStatusMap = {};
+    for (const r of data as DayStatusRow[]) {
+      map[r.day_id] = r.status === 'short' ? { status: 'short', hours: Number(r.short_hours ?? 0) } : { status: r.status };
+    }
+    return map;
+  }
+  // Локальный режим: ключ по логину профиля (совпадает с App).
+  if (!currentProfile) return {};
+  try {
+    const saved = localStorage.getItem(`planner-day-statuses-${currentProfile.login}`);
+    return saved ? (JSON.parse(saved) as DayStatusMap) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Полная синхронизация статусов дней (diff: удаляем ушедшие, upsert остальных).
+ * В локальном режиме зеркально пишем в localStorage под тем же ключом,
+ * который использует App.
+ */
+export async function saveDayStatuses(statuses: DayStatusMap, ownerId?: string): Promise<void> {
+  if (currentProfile) {
+    localStorage.setItem(`planner-day-statuses-${currentProfile.login}`, JSON.stringify(statuses));
+  }
+  if (getStorageMode() !== 'supabase' || !supabase) return;
+  const owner = ownerId ?? currentUserId ?? currentProfile?.id;
+  if (!owner) return;
+
+  const ids = Object.keys(statuses);
+  const { data: existing, error } = await supabase
+    .from('day_statuses')
+    .select('day_id')
+    .eq('owner_id', owner);
+  if (error) throw error;
+
+  const incoming = new Set(ids);
+  const toDelete = (existing as { day_id: string }[]).map((e) => e.day_id).filter((d) => !incoming.has(d));
+  if (toDelete.length > 0) {
+    const { error: delErr } = await supabase
+      .from('day_statuses')
+      .delete()
+      .in('day_id', toDelete)
+      .eq('owner_id', owner);
+    if (delErr) throw delErr;
+  }
+
+  if (ids.length > 0) {
+    const rows = ids.map((dayId) => ({
+      owner_id: owner,
+      day_id: dayId,
+      status: statuses[dayId].status,
+      short_hours: statuses[dayId].status === 'short' ? (statuses[dayId].hours ?? null) : null,
+    }));
+    const { error: upErr } = await supabase
+      .from('day_statuses')
+      .upsert(rows, { onConflict: 'owner_id,day_id' });
+    if (upErr) throw upErr;
+  }
+}
+
 interface ProfileData {
   tasks: Task[];
   assignments: TaskAssignment[];

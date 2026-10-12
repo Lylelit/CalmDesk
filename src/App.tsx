@@ -17,7 +17,7 @@ import { Spinner } from './components/ui';
 // import RedmineSettingsModal from './components/RedmineSettingsModal';
 // import RedmineImportModal from './components/RedmineImportModal';
 import { exportToExcel } from './utils/excelExport';
-import { loadTasks, loadAssignments, saveTasks, saveAssignments, setCurrentProfile, setSupabaseUserId, getStorageMode, migrateLocalToSupabase } from './services/storageService';
+import { loadTasks, loadAssignments, saveTasks, saveAssignments, setCurrentProfile, setSupabaseUserId, getStorageMode, migrateLocalToSupabase, loadDayStatuses, saveDayStatuses } from './services/storageService';
 import { isTeamFeatureEnabled } from './services/teamService';
 // import { getRedmineSettings, RedmineSettings } from './services/redmineService';
 import { useTheme } from './ThemeContext';
@@ -127,14 +127,30 @@ function App() {
       if (getStorageMode() === 'supabase') {
         // Supabase сам хранит сессию (persistSession) — просто спрашиваем её.
         const { supabase } = await import('./services/supabaseClient');
-        const { data } = await supabase!.auth.getSession();
+        const { data, error: sessionErr } = await supabase!.auth.getSession();
+        if (sessionErr) console.error('[auth] getSession:', sessionErr.message);
         const user = data.session?.user;
         if (user) {
-          const { data: prof } = await supabase!
+          const { data: prof, error: profErr } = await supabase!
             .from('profiles')
             .select('display_name, role')
             .eq('id', user.id)
             .maybeSingle();
+          // Если profil'а нет или запрос упал — ругаемся в консоль, но НЕ выходим
+          // из аккаунта иначе пользователь попадает в бесконечный цикл «вход →
+          // экран логина». Роль по умолчанию employee, имя — из email.
+          if (profErr) {
+            console.error(
+              '[auth] Не удалось прочитать profiles. Проверьте, что применена supabase/schema.sql ' +
+                'и что RLS-политика profiles_self_select существует. Ошибка:',
+              profErr.message,
+            );
+          } else if (!prof) {
+            console.warn(
+              '[auth] Профиль пользователя отсутствует в таблице public.profiles — триггер handle_new_user ' +
+                'не сработал. Примените supabase/schema.sql в SQL Editor.',
+            );
+          }
           const profile: Profile = {
             login: user.email ?? '',
             email: user.email ?? undefined,
@@ -194,12 +210,15 @@ function App() {
         const [savedTasks, savedAssignments] = await Promise.all([loadTasks(viewer), loadAssignments(viewer)]);
         board.setTasks(savedTasks);
         board.setAssignments(savedAssignments);
-        const dayStatusesKey = viewingEmployeeId
-          ? `planner-day-statuses-${viewingEmployeeId}`
-          : `planner-day-statuses-${currentUser.login}`;
-        const savedDayStatuses = localStorage.getItem(dayStatusesKey);
-        if (savedDayStatuses) setDayStatuses(JSON.parse(savedDayStatuses));
-        else setDayStatuses({});
+        // Статусы дней (отпуск/выходной/короткий): в supabase-режиме — из облака,
+        // чтобы они тоже были видны с любого устройства. В локальном режиме
+        // loadDayStatuses читает тот же ключ localStorage, что и раньше.
+        try {
+          setDayStatuses(await loadDayStatuses(viewer));
+        } catch (e) {
+          console.error('Error loading day statuses:', e);
+          setDayStatuses({});
+        }
       } catch (error) {
         console.error('Error loading ', error);
       } finally {
@@ -218,6 +237,11 @@ function App() {
   useEffect(() => {
     if (!isLoading && currentUser && !viewingEmployeeId) saveAssignments(assignments);
   }, [assignments, isLoading, currentUser, viewingEmployeeId]);
+  useEffect(() => {
+    // Синхронизируем статусы дней в облако (в localStorage saveDayStatuses
+    // пишет зеркально сам, поэтому отдельная запись больше не нужна).
+    if (!isLoading && currentUser && !viewingEmployeeId) saveDayStatuses(dayStatuses).catch((e) => console.error('Error saving day statuses:', e));
+  }, [dayStatuses, isLoading, currentUser, viewingEmployeeId]);
 
   // ── Обработчики ──────────────────────────────────────────────────────
   const toggleHint = () => {
@@ -244,11 +268,12 @@ function App() {
         if (status === 'working') delete updated[dayId];
         else if (status === 'short') updated[dayId] = { status: 'short', hours };
         else updated[dayId] = { status };
-        localStorage.setItem(`planner-day-statuses-${currentUser?.login}`, JSON.stringify(updated));
+        // Запись в localStorage и синхронизация с Supabase выполняются
+        // эффектом saveDayStatuses (см. выше) — здесь только состояние.
         return updated;
       });
     },
-    [currentUser],
+    [],
   );
 
   const handleSaveTask = useCallback(
@@ -264,7 +289,10 @@ function App() {
     setCurrentProfile(profile);
     setSupabaseUserId(profile.id ?? null);
     setViewingEmployeeId(null);
-    localStorage.setItem('planner-current-user', profile.login);
+    // В supabase-режиме «текущий пользователь» не хранится в localStorage:
+    // сессия живёт в Supabase (persistSession), иначе выход из аккаунта на
+    // одном устройстве оставлял бы «залогиненным» другое.
+    if (getStorageMode() !== 'supabase') localStorage.setItem('planner-current-user', profile.login);
     setIsLoading(true);
   };
 

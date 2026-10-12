@@ -48,6 +48,30 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.handle_new_user();
 
+-- Само-восстановление профиля при входе: если триггер по какой-то причине
+-- не создал строку в profiles (например, схема применена уже после
+-- регистрации пользователей), RPC ensure_my_profile() создаст её.
+-- Вызывается из UI после signInWithPassword.
+create or replace function public.ensure_my_profile()
+returns void
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  insert into public.profiles (id, email, display_name, role)
+  values (
+    auth.uid(),
+    (select email from auth.users where id = auth.uid()),
+    coalesce((select raw_user_meta_data ->> 'display_name' from auth.users where id = auth.uid()),
+             split_part(coalesce((select email from auth.users where id = auth.uid()), ''), '@', 1)),
+    case when (select count(*) from public.profiles) = 0 then 'manager' else 'employee' end
+  )
+  on conflict (id) do nothing;
+end;
+$$;
+revoke all on function public.ensure_my_profile() from anon;
+grant execute on function public.ensure_my_profile() to authenticated;
+
 -- ── 2. Команды: руководитель привязывает к себе сотрудников ────────────────
 create table if not exists public.team_memberships (
   manager_id  uuid not null references public.profiles (id) on delete cascade,
