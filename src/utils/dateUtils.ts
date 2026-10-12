@@ -84,6 +84,19 @@ export function getMonthName(month: number): string {
   return names[month];
 }
 
+/**
+ * Генерация идентификаторов для задач/назначений.
+ * Supabase-таблицы имеют id типа uuid, поэтому новый код использует crypto.randomUUID().
+ * (Старые не-UUID значения из localStorage корректно конвертируются в storageService перед записью в облако.)
+ */
 export function generateId(): string {
-  return Math.random().toString(36).substr(2, 9);
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // Fallback для окружений без crypto.randomUUID — тоже UUID v4.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
