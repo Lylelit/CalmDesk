@@ -88,6 +88,17 @@ npm run build
    `schema.sql` не применён или применён частично. Просто выполните файл ещё раз
    (он идемпотентен), затем выйдите и войдите снова — функция
    `ensure_my_profile()` восстановит отсутствующий профиль автоматически.
+5. Ошибка вида **403 / `permission denied for table profiles|tasks|assignments|day_statuses`**
+   означает, что в проекте Supabase отключены прямые привилегии на таблицы
+   (так настроены все новые проекты после ~мая 2025: политика RLS есть, но
+   роли `anon`/`authenticated` нет права `SELECT`). Решение: выполнить в
+   SQL Editor обновлённый `supabase/schema.sql` целиком — в него добавлены
+   `GRANT`-инструкции; либо быстро проверить тем же запросом:
+   ```sql
+   grant usage on schema public to anon, authenticated;
+   grant select, insert, update, delete on all tables in schema public to anon, authenticated;
+   ```
+   После этого перезагрузить страницу сайта — ошибки 403 исчезнут.
 
 ### Роли и команда
 - Первый зарегистрированный пользователь получает роль `manager`, остальные — `employee`

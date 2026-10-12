@@ -114,7 +114,15 @@ create table if not exists public.day_statuses (
   primary key (owner_id, day_id)
 );
 
--- ── 4. Row Level Security ────────────────────────────────────────────────────
+-- ── 4. Привилегии (GRANT) + Row Level Security ──────────────────────────────
+-- ВАЖНО: в новых проектах Supabase (после ~мая 2025) по умолчанию нет прямого
+-- GRANT на public-таблицы для ролей anon/authenticated — без этих строк
+-- запросы из приложения вернут 403 "permission denied for table ..." даже
+-- при корректных RLS-политиках. Повторное выполнение безопасно.
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on all tables in schema public to anon, authenticated;
+alter default privileges in schema public grant select, insert, update, delete on tables to anon, authenticated;
+
 alter table public.profiles         enable row level security;
 alter table public.team_memberships enable row level security;
 alter table public.tasks            enable row level security;
