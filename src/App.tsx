@@ -81,6 +81,15 @@ function App() {
   const [showSidebar, setShowSidebar] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'new' | 'completed'>('all');
+  // Фильтр блока «Новые задачи»: все / в работе (полностью размещены) / не назначенные (есть незапланированное время).
+  // Состояние сохраняется в localStorage, чтобы активный фильтр переживал перезагрузку и навигацию.
+  const [newTasksFilter, setNewTasksFilter] = useState<'all' | 'inProgress' | 'unassigned'>(() => {
+    const saved = localStorage.getItem('planner-new-tasks-filter');
+    return saved === 'inProgress' || saved === 'unassigned' ? saved : 'all';
+  });
+  useEffect(() => {
+    localStorage.setItem('planner-new-tasks-filter', newTasksFilter);
+  }, [newTasksFilter]);
   const [showExportModal, setShowExportModal] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   // const [redmineSettings, setRedmineSettings] = useState<RedmineSettings | null>(null);
@@ -117,6 +126,19 @@ function App() {
   const filteredTasks = useFilteredTasks(tasks, searchQuery, statusFilter);
 
   const newTasks = useMemo(() => filteredTasks.filter((t) => t.status !== 'completed'), [filteredTasks]);
+
+  // Отфильтрованный по выбранной кнопке список для блока «Новые задачи».
+  // Счётчик (N) в заголовке при этом остаётся общим (newTasks.length).
+  const visibleNewTasks = useMemo(() => {
+    if (newTasksFilter === 'all') return newTasks;
+    return newTasks.filter((t) => {
+      const assigned = board.getTaskAssignedHours(t.id);
+      const remaining = t.totalHours - assigned;
+      // «В работе»: прогресс-бар полностью заполнен (assigned === total, есть галочка ✓).
+      // «Не назначенные»: есть незапланированное время (remaining > 0 — метка «Xч Xм не запланировано»).
+      return newTasksFilter === 'inProgress' ? remaining <= 0 : remaining > 0;
+    });
+  }, [newTasks, newTasksFilter, board.getTaskAssignedHours]);
   const completedCount = useMemo(() => tasks.filter((t) => t.status === 'completed').length, [tasks]);
   const activeTasks = useMemo(() => tasks.filter((t) => t.status !== 'completed'), [tasks]);
   const newTasksTotalHours = useMemo(() => activeTasks.reduce((sum, t) => sum + t.totalHours, 0), [activeTasks]);
@@ -529,6 +551,34 @@ function App() {
                   <h3 style={{ fontSize: 14, fontWeight: 600, color: theme.textPrimary, marginBottom: 12, flexShrink: 0 }}>
                     Новые задачи ({newTasks.length})
                   </h3>
+                  {/* Фильтры блока «Новые задачи»: Все / В работе / Не назначенные */}
+                  <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexShrink: 0 }}>
+                    {([
+                      { key: 'all', label: 'Все' },
+                      { key: 'inProgress', label: 'В работе' },
+                      { key: 'unassigned', label: 'Не назначенные' },
+                    ] as const).map(({ key, label }) => (
+                      <button
+                        key={key}
+                        onClick={() => setNewTasksFilter(key)}
+                        style={{
+                          flex: 1,
+                          padding: '8px 6px',
+                          borderRadius: 8,
+                          border: `1px solid ${newTasksFilter === key ? theme.accent1 : theme.borderPrimary}`,
+                          background: newTasksFilter === key ? theme.accent1 : 'transparent',
+                          color: newTasksFilter === key ? '#fff' : theme.textSecondary,
+                          fontSize: 13,
+                          fontWeight: 500,
+                          cursor: 'pointer',
+                          whiteSpace: 'nowrap',
+                          transition: 'all 0.2s',
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                   <div
                     style={{
                       display: 'flex',
@@ -541,7 +591,12 @@ function App() {
                       boxSizing: 'border-box',
                     }}
                   >
-                    {newTasks.map((task) => (
+                    {visibleNewTasks.length === 0 && (
+                      <div style={{ padding: '16px 0', textAlign: 'center', fontSize: 13, color: theme.textTertiary }}>
+                        Нет задач
+                      </div>
+                    )}
+                    {visibleNewTasks.map((task) => (
                       <div key={task.id} className="task-card-wrapper">
                         <TaskCard
                           task={task}
